@@ -209,7 +209,16 @@ impl Service {
     /// Returns the job id, or an error if a job is already running. Every
     /// target's existing map is archived on-device AND on the host first; a
     /// backup failure aborts before a single byte is overwritten.
-    pub fn share_map(&self, source: &str, targets: Vec<String>) -> Result<u64, String> {
+    ///
+    /// `force` re-copies a puck that is ALREADY on this map root. That is not a
+    /// no-op: pucks sharing a root go on mapping independently, and their maps
+    /// diverge in CONTENT while agreeing on identity. Measured on this fleet
+    /// after a few hours — 1269 points against 1063, across the same six nodes,
+    /// with under 11% of individual points in common. Same frame, different
+    /// detail. Without `force` there is no way to re-establish one puck from
+    /// another, because the root-uuid check that makes the normal path
+    /// idempotent also makes a deliberate refresh impossible.
+    pub fn share_map(&self, source: &str, targets: Vec<String>, force: bool) -> Result<u64, String> {
         use crate::jobs::{Job, JobStep};
 
         if targets.is_empty() {
@@ -233,7 +242,8 @@ impl Service {
         // had in fact worked perfectly.
         steps.push(JobStep::new("re-bridge (hold the pucks still)"));
 
-        let job = Job::new(id, format!("Share map from {source} to {} puck(s)", targets.len()), steps);
+        let verb = if force { "Re-sync map from" } else { "Share map from" };
+        let job = Job::new(id, format!("{verb} {source} to {} puck(s)", targets.len()), steps);
         let src = source.to_string();
         let backups = self.shared.map_backups.clone();
         let sh = Arc::clone(&self.shared);
@@ -242,7 +252,7 @@ impl Service {
         let req = crate::jobs::JobRequest {
             job,
             run: Box::new(move |ctx| {
-                share_map_job(ctx, &src, &targets, &backups, &sh, &bridge_path)
+                share_map_job(ctx, &src, &targets, &backups, &sh, &bridge_path, force)
             }),
         };
         let tx = self.shared.job_tx.lock().unwrap();
@@ -885,6 +895,7 @@ fn share_map_job(
     backups: &std::path::Path,
     shared: &Shared,
     bridge_path: &str,
+    force: bool,
 ) -> Result<String, String> {
     let mut step = 0usize;
 
@@ -965,8 +976,13 @@ fn share_map_job(
             skipped += 1;
             continue;
         }
-        if st.map_persistent && st.map_root == root {
-            ctx.finish_skipped("already on this map");
+        // Same root uuid does NOT mean same map. Each puck keeps mapping on its
+        // own copy, so content diverges while identity does not — which makes
+        // this skip correct for "get everyone onto one frame" and wrong for
+        // "re-establish them from a known-good copy". `force` is that second
+        // case, and it is the only way to reach it.
+        if !force && st.map_persistent && st.map_root == root {
+            ctx.finish_skipped("already on this map (use Re-sync to copy anyway)");
             for _ in 0..3 {
                 ctx.begin(step);
                 step += 1;
@@ -1065,7 +1081,8 @@ fn share_map_job(
     }
 
     Ok(format!(
-        "{done} puck(s) colocated on {}{}",
+        "{done} puck(s) {} on {}{}",
+        if force { "re-synced" } else { "colocated" },
         fleet::short_root(&root),
         if skipped > 0 { format!(", {skipped} skipped") } else { String::new() }
     ))

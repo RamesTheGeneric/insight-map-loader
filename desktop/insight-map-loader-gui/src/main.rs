@@ -439,24 +439,54 @@ impl App {
             drop(chosen);
 
             ui.add_enabled_ui(!job_running && n > 0, |ui| {
-                if ui
-                    .button(format!("⇄ Share map to {n} puck(s)"))
-                    .on_hover_text(
-                        "Copies this puck's Insight map onto every other puck and waits for\n\
-                         each to relocalize into it. They then track in ONE frame with no\n\
-                         host-side transform.\n\n\
-                         Each target's existing map is archived on-device and on the host\n\
-                         first. Restarting tracking resets each target's Insight frame, so\n\
-                         stand the pucks still for a moment afterwards to re-bridge, and\n\
-                         anything they mapped since their last automatic write is lost.",
-                    )
-                    .clicked()
-                {
-                    match self.service.share_map(&cur, targets) {
-                        Ok(_) => {}
-                        Err(e) => eprintln!("share_map: {e}"),
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(format!("⇄ Share map to {n} puck(s)"))
+                        .on_hover_text(
+                            "Copies this puck's Insight map onto every other puck and waits for\n\
+                             each to relocalize into it. They then track in ONE frame with no\n\
+                             host-side transform.\n\n\
+                             Pucks ALREADY on this map are skipped — use ⟲ Re-sync for those.\n\n\
+                             Each target's existing map is archived on-device and on the host\n\
+                             first. Restarting tracking resets each target's Insight frame, so\n\
+                             stand the pucks still for a moment afterwards to re-bridge, and\n\
+                             anything they mapped since their last automatic write is lost.",
+                        )
+                        .clicked()
+                    {
+                        match self.service.share_map(&cur, targets.clone(), false) {
+                            Ok(_) => {}
+                            Err(e) => eprintln!("share_map: {e}"),
+                        }
                     }
-                }
+
+                    // Same root uuid is NOT the same map. Pucks sharing a root
+                    // keep mapping independently, so their CONTENT drifts apart
+                    // while their identity does not -- and the skip that makes
+                    // Share idempotent then blocks every refresh. This is the
+                    // way back to one known-good copy.
+                    if ui
+                        .button("⟲ Re-sync")
+                        .on_hover_text(
+                            "Copy this puck's map onto the others EVEN IF they already report\n\
+                             the same map.\n\n\
+                             Pucks sharing a map root go on mapping independently, so their\n\
+                             maps diverge in content while still agreeing on identity — same\n\
+                             frame, different detail. Share skips them for exactly that\n\
+                             reason; this does not.\n\n\
+                             Same safety as Share: every target's map is archived on-device\n\
+                             and on the host first. But it DISCARDS what each target mapped\n\
+                             on its own, and restarts its tracking — hold the pucks still\n\
+                             afterwards to re-bridge.",
+                        )
+                        .clicked()
+                    {
+                        match self.service.share_map(&cur, targets.clone(), true) {
+                            Ok(_) => {}
+                            Err(e) => eprintln!("re-sync map: {e}"),
+                        }
+                    }
+                });
             });
         }
 

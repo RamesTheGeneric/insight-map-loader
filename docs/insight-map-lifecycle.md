@@ -116,6 +116,43 @@ CREATE there instead.
 
 ---
 
+## RE-SYNC — same root, diverged content
+
+**Sharing a map root does not keep two pucks' maps identical.** Each goes on
+mapping into its own copy, so content diverges while identity does not. Measured
+on this fleet after a few hours on one shared root `8994724e`:
+
+| | `.108` | `.132` |
+|---|---|---|
+| map points | 1269 | 1063 |
+| L1 nodes | 6 | the same 6 uuids |
+| mapdb size | 5184 KB | 3908 KB |
+| points in common (to 0.1 mm) | under 11% per node | |
+
+Neither puck had added or removed a node — each had *refined* the same six. And
+they still agreed geometrically: `.132`'s points sat a median **0.066 m** from
+the nearest `.108` point, against `.108`'s own point spacing of **0.068 m**.
+Agreement to within the map's own resolution, so colocation was intact.
+
+That is the normal case and needs no action. Diverged point counts are not a
+fault. But when you do want every puck back on one known-good copy, **`⟲ Re-sync`
+in the GUI** copies the source's map across *even to pucks already reporting that
+root*.
+
+Plain `⇄ Share map` deliberately skips those pucks — it exists to get a fleet
+onto one frame, and re-copying a puck already on that frame would be a tracking
+outage for nothing. That skip is right for Share and is exactly what blocks a
+refresh, which is why Re-sync is a separate button rather than a change to it.
+
+Re-sync runs every step Share does, both backups included. It is still
+destructive: the target **loses whatever it mapped independently**, its tracking
+restarts, and its bridge must be re-solved afterwards.
+
+> Restoring a backup needs the `chcon` above re-run. Toybox `cp -a` does not
+> preserve the SELinux label, so a restored map is silently unreadable without it.
+
+---
+
 ## READ — get points and descriptors on the host
 
 Independent of everything: no VR session, no tracking, device may be asleep.
