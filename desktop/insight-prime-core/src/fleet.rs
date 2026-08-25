@@ -16,19 +16,6 @@ use crate::mpt1::Pose;
 
 const TRACKER_PKG: &str = "com.mapperlocalizer.questtracker";
 
-fn base64(data: &[u8]) -> String {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(T[(n >> 18 & 63) as usize] as char);
-        out.push(T[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
-    }
-    out
-}
 
 /// Every adb call is wrapped in `timeout`. std's Command has no deadline, and
 /// a single hung adb wedges its caller forever: a launch-style `adb shell`
@@ -146,10 +133,9 @@ fn shell_checked(ip: &str, cmd: &str, secs: u32) -> Result<String, FleetError> {
 }
 
 /// Re-acquire adb root. A REBOOT drops adbd back to the `shell` user, and the
-/// on-device binaries (q1serve, q1verify) are root-owned -- so every recovery
-/// path that starts them must do this first or it fails silently, leaving a
-/// puck that looks alive and verifies nothing. Cheap and idempotent when
-/// already root.
+/// path that needs it must do this first or it fails SILENTLY -- setprop,
+/// chown and chcon all appear to succeed and do nothing, so the breakage
+/// surfaces anywhere except at root. Cheap and idempotent when already root.
 pub fn ensure_root(ip: &str) -> bool {
     if shell(ip, "id -u").map_or(false, |o| o.trim() == "0") {
         return true;
@@ -180,10 +166,6 @@ pub struct PuckStatus {
     /// perfectly healthy. Surfaced first-class because it looks exactly like a
     /// tracking failure and is not one.
     pub vpn_trap: bool,
-    /// The on-puck verifier's latest self-check: (verdict, median residual deg).
-    /// Empty verdict = the verifier is not running / has no reading yet.
-    pub verify_verdict: String,
-    pub verify_median: f64,
     /// Short root-node uuid of the puck's current Insight map context. Pucks
     /// sharing a map report the SAME root — that is what colocation looks like
     /// from the outside, and it is the field the UI compares across pucks.
@@ -194,6 +176,22 @@ pub struct PuckStatus {
 }
 
 /// Whole-headset status in one shell round trip.
+/// The headset pose in its Insight WORLD frame, from dumpsys. ~300 ms round
+/// trip and 2-decimal precision — this is the bridge's world-side observation,
+/// not a pose source for tracking (the MPT1 stream is that).
+pub fn dumpsys_pose(ip: &str) -> Option<Pose> {
+    let cmd = "dumpsys tracking > /data/local/tmp/q2p.txt 2>/dev/null; \
+               grep -A4 '  Hmd:' /data/local/tmp/q2p.txt";
+    let out = shell(ip, cmd).ok()?;
+    if !out.contains("6DOF") || !out.contains("Valid: Yes") {
+        return None;
+    }
+    let rot = floats_after(&out, "rot=(", 4)?;
+    let tr = floats_after(&out, "trans=(", 3)?;
+    // dumpsys rot=() is (x,y,z,w) — same order every pose CSV in this repo uses.
+    Some(Pose { p: [tr[0], tr[1], tr[2]], q: [rot[0], rot[1], rot[2], rot[3]] })
+}
+
 pub fn status(ip: &str) -> PuckStatus {
     let cmd = concat!(
         "dumpsys tracking > /data/local/tmp/q2s.txt 2>/dev/null; ",
@@ -202,7 +200,6 @@ pub fn status(ip: &str) -> PuckStatus {
         "dumpsys battery | grep -m1 level:; echo '@@'; ",
         "getprop persist.oculus.guardian_disable; echo '@@'; ",
         "ip route 2>/dev/null | grep -c tun0; echo '@@'; ",
-        "cat /data/local/tmp/q1verify.json 2>/dev/null; echo '@@'; ",
         "grep -m1 'Vega Map Context' /data/local/tmp/q2s.txt"
     );
     let Ok(out) = shell(ip, cmd) else { return PuckStatus::default() };
@@ -225,19 +222,12 @@ pub fn status(ip: &str) -> PuckStatus {
     }
     st.guardian_disabled = parts.get(3).map_or(false, |p| p.trim() == "1");
     st.vpn_trap = parts.get(4).map_or(false, |p| p.trim() != "0" && !p.trim().is_empty());
-    if let Some(j) = parts.get(5) {
-        if let Some(v) = json_field(j, "verdict") {
-            st.verify_verdict = v;
-            st.verify_median =
-                json_field(j, "median_deg").and_then(|s| s.trim().parse().ok()).unwrap_or(99.0);
-        }
-    }
     // "Vega Map Context: topNodeUid <uuid>, timeCount = N (persistent|transient)"
     //
     // The FULL uuid is kept: it is the success criterion for a map transplant,
     // and 8 hex characters is a display convenience, not an identity. Truncate
     // with `short_root()` at the point of display.
-    if let Some(p) = parts.get(6) {
+    if let Some(p) = parts.get(5) {
         if let Some(i) = p.find("topNodeUid ") {
             let rest = &p[i + 11..];
             let uuid = rest.split(|c: char| c == ',' || c.is_whitespace()).next().unwrap_or("");
@@ -246,33 +236,6 @@ pub fn status(ip: &str) -> PuckStatus {
         st.map_persistent = p.contains("(persistent)");
     }
     st
-}
-
-/// The headset pose in its Insight WORLD frame, from dumpsys. ~300 ms round
-/// trip and 2-decimal precision — this is the bridge's world-side observation,
-/// not a pose source for tracking (the MPT1 stream is that).
-pub fn dumpsys_pose(ip: &str) -> Option<Pose> {
-    let cmd = "dumpsys tracking > /data/local/tmp/q2p.txt 2>/dev/null; \
-               grep -A4 '  Hmd:' /data/local/tmp/q2p.txt";
-    let out = shell(ip, cmd).ok()?;
-    if !out.contains("6DOF") || !out.contains("Valid: Yes") {
-        return None;
-    }
-    let rot = floats_after(&out, "rot=(", 4)?;
-    let tr = floats_after(&out, "trans=(", 3)?;
-    // dumpsys rot=() is (x,y,z,w) — same order every pose CSV in this repo uses.
-    Some(Pose { p: [tr[0], tr[1], tr[2]], q: [rot[0], rot[1], rot[2], rot[3]] })
-}
-
-/// Minimal one-level JSON string/number field extractor. The verifier writes a
-/// flat single-line object, so a real parser would be overkill; this reads the
-/// raw value token after `"key":`.
-fn json_field(j: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let i = j.find(&needle)?;
-    let rest = &j[i + needle.len()..];
-    let c = rest.find(':')? + 1;
-    Some(rest[c..].trim_start_matches([' ', '"']).split([',', '"', '}']).next()?.to_string())
 }
 
 fn floats_after(s: &str, tag: &str, n: usize) -> Option<Vec<f32>> {
@@ -363,48 +326,9 @@ pub fn start_tracker(ip: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Push a fresh T_map_world to the on-puck verifier so it scores against the
-/// transform actually in use. Without this, an accepted re-localization
-/// leaves the verifier judging the OLD transform and refuting a correct
-/// alignment. Binary form matches apps/q1verify.cpp: 'Q1TM' + yaw(rad) f32 +
-/// t[3] f32, little-endian, written atomically on-device.
-pub fn push_map_transform(ip: &str, yaw_deg: f32, t: [f32; 3]) -> std::io::Result<()> {
-    let mut buf = Vec::with_capacity(20);
-    buf.extend_from_slice(&0x4d54_3151u32.to_le_bytes()); // 'Q1TM'
-    buf.extend_from_slice(&yaw_deg.to_radians().to_le_bytes());
-    for v in t {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    // base64 through the shell: no local temp file, no adb-push race with the
-    // verifier's next read, and the rename on-device is atomic. (Hex-through-
-    // printf was tried and failed -- toybox xargs -0 does not interpret \x
-    // escapes, so it wrote the literal bytes 'x51x31...'.)
-    let b64 = base64(&buf);
-    let dst = "/data/local/tmp/t_map.bin";
-    shell(ip, &format!(
-        "echo {b64} | base64 -d > {dst}.tmp && mv -f {dst}.tmp {dst}"))?;
-    Ok(())
-}
 
-/// Stop the on-puck q1verify (before a mode change restarts it).
-pub fn stop_verifier(ip: &str) {
-    shell(ip, "pkill q1verify").ok();
-}
 
-/// Is the running q1verify in --localize mode? Lets the service detect a
-/// puck whose role changed (or that predates the localizer) and restart it
-/// in the right mode instead of trusting whatever survived the last deploy.
-pub fn verifier_localizing(ip: &str) -> bool {
-    // grep -a reads the NUL-separated cmdline as text; piping it through
-    // `tr` needed a literal NUL in the command, which the shell rejected.
-    shell(ip, "grep -ac localize /proc/$(pidof q1verify)/cmdline 2>/dev/null")
-        .map_or(false, |o| o.trim().starts_with('1'))
-}
 
-/// Is the on-puck verifier process alive?
-pub fn verifier_running(ip: &str) -> bool {
-    shell(ip, "pidof q1verify").map_or(false, |o| !o.trim().is_empty())
-}
 
 /// Restart the on-puck verifier if its binary is already deployed. The
 /// verifier is a plain native binary, so unlike the tracker (which has a boot
@@ -486,119 +410,11 @@ pub fn snapshot_age_secs(ip: &str) -> Option<f64> {
     Some(now - cap / 1e9)
 }
 
-/// Kill a stalled q1serve so `ensure_serving` will build a fresh one.
-///
-/// A stalled instance must be killed explicitly: it still holds the cameras
-/// and still owns port 8080, so simply launching another one does nothing.
-pub fn restart_serving(ip: &str) -> bool {
-    ensure_root(ip);
-    shell(ip, "pkill -f q1serve").ok();
-    std::thread::sleep(Duration::from_millis(600));
-    ensure_serving(ip)
-}
 
-pub fn ensure_serving(ip: &str) -> bool {
-    if shell(ip, "pidof q1serve").map_or(false, |o| !o.trim().is_empty()) {
-        return true;
-    }
-    ensure_root(ip);
-    // Copy the factory-path binary ONLY when the deployed one is missing.
-    // The unconditional cp -f here silently rolled the sensor-hub q1serve
-    // back to the ancient pre-shm build on every watchdog restart -- q1track
-    // then froze waiting on a ring nothing was writing, and a freshly pushed
-    // binary "mysteriously" md5-mismatched minutes later.
-    shell(ip, "[ -x /data/local/tmp/q1serve ] || cp -f /data/nativetest64/vendor/ovrcam/q1serve /data/local/tmp/q1serve 2>/dev/null; chmod 755 /data/local/tmp/q1serve").ok();
-    shell(ip, "setsid /data/local/tmp/q1serve --exposure long --q 75 > /data/local/tmp/q1serve.log 2>&1 < /dev/null &").ok();
-    std::thread::sleep(Duration::from_secs(3));
-    shell(ip, "pidof q1serve").map_or(false, |o| !o.trim().is_empty())
-}
 
-/// Restore the synthetic display-TE pulse on a panel-less puck.
-///
-/// A puck with its display panels removed tracks at 0DOF until the
-/// SeperationAnxiety kernel module drives the TE line the panel used to
-/// (docs/quest1-hal.md). The module does not survive a reboot, and with no
-/// panels the headset also has no way to SHOW that anything is wrong -- so a
-/// rebooted panel-less puck sits invisibly dead until this runs.
-///
-/// Self-limiting by construction: it only fires when tracking is NOT valid,
-/// only when the .ko is present on the puck, and only when the module is not
-/// already loaded. A puck with panels is 6DOF, so it never gets here; a puck
-/// without the .ko pushed is left alone.
-pub fn ensure_sync_module(ip: &str, tracking_valid: bool) -> bool {
-    if tracking_valid {
-        return false;
-    }
-    ensure_root(ip);
-    let out = shell(ip, concat!(
-        "[ -f /data/local/tmp/seperationanxiety.ko ] || { echo no-ko; exit 0; }; ",
-        "lsmod | grep -q '^seperationanxiety' && { echo loaded; exit 0; }; ",
-        "insmod /data/local/tmp/seperationanxiety.ko && echo inserted || echo failed"));
-    out.map_or(false, |o| o.contains("inserted"))
-}
 
-/// `localize`: run the kernel as the on-device LOCALIZER (ankles) -- it
-/// re-solves T_ankle_hip each cycle and writes q1localize.json, which the
-/// service reads back as the convergence feedback. Plain verify (the hip)
-/// judges its transform and writes q1verify.json as before.
-pub fn restart_verifier(ip: &str, localize: bool) -> bool {
-    // Root first: a reboot drops adbd to `shell` and these binaries are
-    // root-owned, so without this the restart silently does nothing.
-    ensure_root(ip);
-    let present = shell(ip, "ls /data/local/tmp/q1verify 2>/dev/null")
-        .map_or(false, |o| o.contains("q1verify"));
-    if !present {
-        return false;
-    }
-    // The verifier is useless without its frame source.
-    ensure_serving(ip);
-    let args = if localize {
-        "--localize --interval 20 --scan 2 --out /data/local/tmp/q1localize.json"
-    } else {
-        ""
-    };
-    // The subshell + explicit redirect of the SHELL's own descriptors is what
-    // lets adb return: backgrounding alone leaves the child holding the
-    // stream adb waits on, and the call hangs indefinitely.
-    shell(ip, &format!(
-        "(cd /data/local/tmp && chmod +x q1verify && setsid ./q1verify {args} \
-          > q1verify.log 2>&1 < /dev/null &) > /dev/null 2>&1; exit 0"))
-        .is_ok()
-}
 
-/// The on-device localizer's latest solve: (verdict, inliers, yaw_deg, t,
-/// unix_time). The stamp lets the poll ignore a report it has already
-/// ingested and anything stale from a dead process.
-pub fn localize_result(ip: &str) -> Option<(String, i64, f64, [f32; 3], i64)> {
-    let out = shell(ip, "cat /data/local/tmp/q1localize.json 2>/dev/null").ok()?;
-    let v = out.trim();
-    if v.is_empty() {
-        return None;
-    }
-    let verdict = json_field(v, "verdict")?;
-    let inliers = json_field(v, "inliers").and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-    let yaw = json_field(v, "yaw_deg").and_then(|s| s.trim().parse().ok()).unwrap_or(f64::NAN);
-    let t = [
-        json_field(v, "tx").and_then(|s| s.trim().parse().ok()).unwrap_or(f32::NAN),
-        json_field(v, "ty").and_then(|s| s.trim().parse().ok()).unwrap_or(f32::NAN),
-        json_field(v, "tz").and_then(|s| s.trim().parse().ok()).unwrap_or(f32::NAN),
-    ];
-    let stamp = json_field(v, "t").and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0) as i64;
-    Some((verdict, inliers, yaw, t, stamp))
-}
 
-/// Read the on-puck verifier's latest verdict JSON, if any.
-pub fn verify_verdict(ip: &str) -> Option<(String, i64, f64)> {
-    let out = shell(ip, "cat /data/local/tmp/q1verify.json 2>/dev/null").ok()?;
-    let v = out.trim();
-    if v.is_empty() {
-        return None;
-    }
-    let verdict = json_field(v, "verdict")?;
-    let matches = json_field(v, "matches").and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-    let median = json_field(v, "median_deg").and_then(|s| s.trim().parse().ok()).unwrap_or(99.0);
-    Some((verdict, matches, median))
-}
 
 pub fn stop_tracker(ip: &str) -> std::io::Result<()> {
     shell(ip, &format!("am force-stop {TRACKER_PKG}"))?;

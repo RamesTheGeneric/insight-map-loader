@@ -146,7 +146,7 @@ impl App {
             }
             tally.into_iter().max_by_key(|&(_, n)| n).map(|(k, _)| k.to_string())
         };
-        if view.colocated {
+        {
             let n_shared = rows
                 .iter()
                 .filter(|r| {
@@ -287,24 +287,14 @@ impl App {
                         }
                     });
                 }
-                // The on-puck verifier's continuous self-check.
-                if !r.status.verify_verdict.is_empty() {
-                    let (txt, col) = match r.status.verify_verdict.as_str() {
-                        "confirmed" => (format!("self-check: aligned ({:.1}°)", r.status.verify_median), Color32::from_rgb(0x54,0xd0,0x8a)),
-                        "refuted" => (format!("self-check: DRIFTED ({:.1}°)", r.status.verify_median), Color32::LIGHT_RED),
-                        "unknown" => ("self-check: inconclusive".into(), Color32::GRAY),
-                        "moving" => ("self-check: (in motion)".into(), Color32::GRAY),
-                        _ => (format!("self-check: {}", r.status.verify_verdict), Color32::GRAY),
-                    };
-                    ui.label(egui::RichText::new(txt).small().color(col));
-                }
-                if view.colocated {
-                    // Natively colocated: there is no T_map_world to report --
-                    // it is identity. What matters instead is whether this puck
-                    // shares the others' map, which is visible as the root node
-                    // uuid. Same root everywhere = one tracking universe.
-                    // Compare FULL uuids; show the short form. The 8-char
-                    // prefix is a display convenience, not an identity.
+                // There is no per-puck transform to report — it is identity.
+                // What matters is whether this puck shares the others' map,
+                // which is visible as the root node uuid: same root everywhere
+                // is one tracking universe.
+                //
+                // Compare FULL uuids; show the short form. The 8-char prefix is
+                // a display convenience, not an identity.
+                {
                     let root = &r.status.map_root;
                     let shown = fleet::short_root(root);
                     // No persistent map = this puck cannot be colocated and
@@ -347,24 +337,6 @@ impl App {
                         (format!("map {shown} — DIFFERENT map from the fleet"), Color32::LIGHT_RED)
                     };
                     ui.label(egui::RichText::new(txt).small().color(col));
-                } else if let Some((_, yaw, seeded)) =
-                    view.map_t.iter().find(|(ip, _, _)| ip == &r.ip)
-                {
-                    // The map's verdict: this puck's T_map_world.
-                    let txt = if view.localizing.iter().any(|ip| ip == &r.ip) {
-                        format!("map: localizing… (now {yaw:+.1}°)")
-                    } else if *seeded {
-                        format!("map: seeded {yaw:+.1}° — refines on first walk")
-                    } else {
-                        format!("map ok ({yaw:+.1}°)")
-                    };
-                    ui.label(egui::RichText::new(txt).small().color(Color32::GRAY));
-                } else {
-                    ui.label(
-                        egui::RichText::new("map: none — joins when walked")
-                            .small()
-                            .color(Color32::YELLOW),
-                    );
                 }
                 // The watchdog's verdict on this puck's frame bridge.
                 if let Some((_, st, yaw)) = view.bridges.iter().find(|(ip, _, _)| ip == &r.ip) {
@@ -416,21 +388,6 @@ impl App {
              frame the stored bridge described. Hold the pucks STILL.").clicked()
         {
             self.service.request_bridge();
-        }
-
-        // Localization solves T_map_world. With a shared map that transform is
-        // identity by construction, and the service refuses the request
-        // outright — so the button would be a lie. Hide it rather than leave
-        // dead UI that looks like it should help when something is wrong.
-        if !view.colocated {
-            ui.add_enabled_ui(!view.realign_running, |ui| {
-                if ui.button("◈ Localize now").on_hover_text(
-                    "Manual override — pucks localize themselves when they join,\n\
-                     drift, or recover. Needs the puck to be WALKED during the grab.").clicked()
-                {
-                    self.service.request_realign();
-                }
-            });
         }
 
         // ---- map sharing: the whole colocation workflow in one button.
@@ -579,11 +536,7 @@ impl App {
             painter.text(
                 rect.center_top() + Vec2::new(0.0, 18.0),
                 Align2::CENTER_CENTER,
-                if self.cfg.auto_realign {
-                    "alignment drifted — auto re-solve pending"
-                } else {
-                    "alignment drifted — press Re-solve"
-                },
+                "separation drifted — hold the pucks still and re-bridge",
                 FontId::proportional(14.0),
                 Color32::from_rgb(0xe5, 0x68, 0x6a),
             );

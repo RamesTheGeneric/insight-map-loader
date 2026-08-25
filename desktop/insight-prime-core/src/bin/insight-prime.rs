@@ -286,6 +286,3 @@ fn run(cfg: &Config) -> i32 {
     }
 }
 
-fn mtime(path: &str) -> Option<SystemTime> {
-    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
-}

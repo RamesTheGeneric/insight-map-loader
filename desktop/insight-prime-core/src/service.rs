@@ -12,19 +12,15 @@
 //!   silently. Wearing the pucks, stillness happens every time the user stands
 //!   still for two seconds.
 //! * **Drift monitor.** Worn together, the inter-puck separation holds a
-//!   baseline (gait wiggles it by ~centimetres); the alignment going stale
-//!   shows up as a step-change that persists. That flips health to Drifted,
-//!   and — if `auto_realign` is on — runs the capture+solve pipeline, whose
-//!   output the service hot-reloads. The measured caveat applies: separation
-//!   detects alignment *change*, not alignment *error*, so a wrong-but-stable
-//!   transform must still be caught by a re-solve.
+//!   baseline (gait wiggles it by ~centimetres); a bridge going stale shows up
+//!   as a step-change that persists. That flips health to Drifted and asks for
+//!   a re-bridge. The measured caveat applies: separation detects *change*, not
+//!   *error*, so a wrong-but-stable bridge is invisible to it.
 //!
 //! The GUI and CLI are thin views over this; their buttons just set the same
 //! flags the watchdogs set themselves.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::{BufRead, BufReader, Write as IoWrite};
-use std::process::{Child, Command, Stdio};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -66,7 +62,6 @@ const DRIFT_UNEXPLAINED_M: f32 = 0.4;
 // A pose moving faster than any human wears it is a frame event, not motion.
 const TELEPORT_SPEED: f32 = 10.0; // m/s implied between consecutive samples
 const TELEPORT_MIN_DIST: f32 = 0.15; // m, below dumpsys/step noise concerns
-const AUTO_REALIGN_COOLDOWN: Duration = Duration::from_secs(600);
 // A localization needs the puck to have MOVED (measured: stationary queries
 // are worse than a stale transform). Spread over a rolling window is the gate.
 /// A bridge is only as good as its spread, and the HIP's bridge rotates the
@@ -76,31 +71,6 @@ const AUTO_REALIGN_COOLDOWN: Duration = Duration::from_secs(600);
 /// floor. The watchdog retries on the next still window, so a strict bar costs
 /// nothing but a short wait.
 const BRIDGE_MAX_SPREAD_DEG: f32 = 0.5;
-const JOIN_SPREAD_M: f32 = 0.6;
-const JOIN_WINDOW: Duration = Duration::from_secs(12);
-/// Minimum gap between opportunistic hip-map folds. Accumulation is meant to
-/// be invisible: one short grab whenever the hip happens to be moving, never
-/// a stream of them.
-const FOLD_MIN_GAP: Duration = Duration::from_secs(120);
-/// On-device solves below this many inliers carry no feedback weight. Set
-/// from measurement: a 328-inlier solve was allowed to overwrite the
-/// 1786-inlier cold-start join and swung the alignment 2.5 deg.
-const FEEDBACK_MIN_INLIERS: i64 = 500;
-/// Fraction of the measured correction applied per update. A full replace
-/// makes the stored transform a random walk over single-frame solves; a
-/// partial step averages them instead, so noise cancels and only a consistent
-/// bias accumulates.
-const FEEDBACK_GAIN: f64 = 0.35;
-/// Hard per-update ceiling, so no single batch can move the alignment far.
-const FEEDBACK_MAX_STEP_DEG: f64 = 0.5;
-const FEEDBACK_MAX_STEP_M: f64 = 0.05;
-/// How far on-device refinement may wander from the host cold-start anchor
-/// before it is refusing to converge and needs a real re-solve instead. The
-/// host join pools ~12 walked viewpoints; a single-frame on-device solve is
-/// meant to REFINE that, never redefine it.
-const FEEDBACK_MAX_DRIFT_DEG: f64 = 2.0;
-const FEEDBACK_MAX_DRIFT_M: f64 = 0.25;
-const LOCALIZE_COOLDOWN: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BridgeState {
@@ -118,20 +88,11 @@ pub struct View {
     pub sep: Option<f32>,
     pub slots: Vec<(Device, SlotState, f32, f32)>, // state, age s, rate Hz
     pub emitted: u64,
-    /// Per-puck T_map_world as applied: (ip, yaw_deg, seeded-not-yet-localized).
-    /// Empty in colocated mode — there is no map transform to report.
-    pub map_t: Vec<(String, f32, bool)>,
     pub n_transforms: usize,
-    /// Native colocation is configured, so the UI should report shared-map
-    /// agreement instead of per-puck transforms.
-    pub colocated: bool,
     /// Long fleet operations, newest last. Snapshot, like `events`.
     pub jobs: Vec<crate::jobs::Job>,
-    /// Pucks with a grab+localize currently running.
-    pub localizing: Vec<String>,
     pub bridges: Vec<(String, BridgeState, f32)>, // ip, state, yaw°
     pub drifted: bool,
-    pub realign_running: bool,
     pub events: Vec<String>,
     pub error: Option<String>,
 }
@@ -187,59 +148,17 @@ impl Default for DriftDetector {
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
-enum LocKind {
-    /// Full solve: needs walking, updates the transform.
-    Localize,
-    /// Score the CURRENT transform against the map with a quick stationary
-    /// glance — the direct misalignment oracle after a reboot or gap.
-    Verify,
-    /// Fold the hip's current view into the reference map (opportunistic
-    /// accumulation): triggered by observed natural movement, founds the map
-    /// from nothing on the first fire, re-deploys the on-puck subset after.
-    /// This is what makes map quality nobody's job.
-    Fold,
-}
 
-struct LocReq {
-    ip: String,
-    coldstart: bool,
-    kind: LocKind,
-}
 
-struct LocState {
-    tx: Option<mpsc::Sender<LocReq>>,
-    inflight: BTreeSet<String>,
-    last_attempt: BTreeMap<String, Instant>,
-}
 
 struct Shared {
     view: Mutex<View>,
-    loc: Mutex<LocState>,
-    /// Recent verification results per puck: (median_deg, when). Two pucks
-    /// refuted by SIMILAR amounts is common-mode map drift (relative
-    /// alignment intact, playspace cal absorbs it); ONE puck refuted alone is
-    /// the harmful, differential kind.
-    verdicts: Mutex<BTreeMap<String, (f64, Instant)>>,
     rebuild: AtomicBool,
     bridge_now: AtomicBool,  // manual "bridge as soon as still"
-    realign_now: AtomicBool, // manual re-solve request
-    realign_running: AtomicBool,
     /// Pucks whose bridge should be verified at the next opportunity — set by
     /// the teleport detector, consumed by the watchdog (which relaxes its
     /// stillness/interval gates for that one check).
     verify: Mutex<std::collections::BTreeSet<String>>,
-    /// The hip's IP, so request_kind can refuse to localize it from ANY path.
-    hip_ip: Option<String>,
-    /// Native colocation: the pucks share one Insight map, so there is no
-    /// T_map_world to solve. Localization is refused outright in this mode --
-    /// solving one would write a transform that moves a frame which is already
-    /// correct by construction.
-    colocated: bool,
-    /// Pucks whose transform is currently owned by the continuous pair stream
-    /// (last paircal write instant). While fresh, every other alignment
-    /// writer stands down for that puck.
-    paircal: Mutex<BTreeMap<String, Instant>>,
     /// Long fleet operations (map share, map create) with real progress and
     /// real errors. Serialized -- see jobs.rs.
     jobs: Arc<crate::jobs::JobQueue>,
@@ -383,11 +302,6 @@ impl Service {
         self.shared.bridge_now.store(true, Ordering::Relaxed);
     }
 
-    /// Manual override: localize every configured puck against the map now.
-    pub fn request_realign(&self) {
-        self.shared.realign_now.store(true, Ordering::Relaxed);
-    }
-
     pub fn start(cfg: Config) -> Result<Service, String> {
         let ingest = Arc::new(
             Ingest::bind(&cfg.listen, Duration::from_millis(500))
@@ -395,20 +309,9 @@ impl Service {
         );
         let shared = Arc::new(Shared {
             view: Mutex::new(View::default()),
-            loc: Mutex::new(LocState {
-                tx: None,
-                inflight: BTreeSet::new(),
-                last_attempt: BTreeMap::new(),
-            }),
-            verdicts: Mutex::new(BTreeMap::new()),
             rebuild: AtomicBool::new(true),
             bridge_now: AtomicBool::new(false),
-            realign_now: AtomicBool::new(false),
-            realign_running: AtomicBool::new(false),
             verify: Mutex::new(std::collections::BTreeSet::new()),
-            hip_ip: cfg.hip().map(|p| p.ip.clone()),
-            colocated: cfg.colocated,
-            paircal: Mutex::new(BTreeMap::new()),
             jobs: Arc::new(crate::jobs::JobQueue::new()),
             job_tx: Mutex::new(None),
             map_backups: map_backup_dir(),
@@ -434,71 +337,19 @@ impl Service {
                 .map_err(|e| e.to_string())?;
         }
 
-        // MPT2: the pucks' OWN tracker (q1track) streams map-frame poses on
-        // listen-port+2. Pairing it against the Insight stream per puck is the
-        // continuous alignment (SpaceCalibrator model): the window of recent
-        // pairs IS the calibration.
-        let mpt2 = {
-            let addr = bump_port(&cfg.listen, 2);
-            Ingest::bind(&addr, Duration::from_millis(500))
-                .map_err(|e| format!("mpt2 {addr}: {e}"))?
-        };
-        spawn_aggregate(cfg.clone(), Arc::clone(&ingest), Arc::new(mpt2), Arc::clone(&shared))?;
+        spawn_aggregate(cfg.clone(), Arc::clone(&ingest), Arc::clone(&shared))?;
         spawn_bridge_watchdog(cfg.clone(), Arc::clone(&ingest), Arc::clone(&shared))?;
-        spawn_verifier_poll(cfg.clone(), Arc::clone(&shared))?;
         let bridge_path = cfg.bridge.clone();
         let pucks = cfg.pucks.clone();
         let host = cfg.host.clone();
         let listen_port =
             cfg.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(5180);
-        spawn_mapd(cfg, Arc::clone(&shared))?;
         Ok(Service { shared, ingest, bridge_path, pucks, host, listen_port })
     }
 }
 
-/// Enqueue a grab+localize for one puck. `manual` bypasses the cooldown.
-fn request_localize(shared: &Shared, ip: &str, coldstart: bool, manual: bool) -> bool {
-    request_kind(shared, ip, coldstart, manual, LocKind::Localize)
-}
 
-fn request_verify(shared: &Shared, ip: &str) -> bool {
-    request_kind(shared, ip, false, true, LocKind::Verify)
-}
 
-fn request_kind(shared: &Shared, ip: &str, coldstart: bool, manual: bool, kind: LocKind) -> bool {
-    // The hip IS the map frame. Localizing it solves it into its own map and
-    // writes a non-identity transform, which silently moves the frame every
-    // other puck is aligned to -- it happened, from the verify-refuted path.
-    // Refuse it here so no future caller can reintroduce that.
-    if kind == LocKind::Localize && shared.hip_ip.as_deref() == Some(ip) {
-        return false;
-    }
-    // Colocated pucks share one map frame, so there is nothing to localize INTO
-    // -- a solve here could only introduce error into a frame that is already
-    // identity. Verification still runs; it is read-only.
-    if kind == LocKind::Localize && shared.colocated {
-        return false;
-    }
-    let mut loc = shared.loc.lock().unwrap();
-    if loc.inflight.contains(ip) {
-        return false;
-    }
-    if !manual {
-        if let Some(t) = loc.last_attempt.get(ip) {
-            if t.elapsed() < LOCALIZE_COOLDOWN {
-                return false;
-            }
-        }
-    }
-    let Some(tx) = loc.tx.as_ref() else { return false };
-    if tx.send(LocReq { ip: ip.into(), coldstart, kind }).is_ok() {
-        loc.inflight.insert(ip.into());
-        loc.last_attempt.insert(ip.into(), Instant::now());
-        true
-    } else {
-        false
-    }
-}
 
 /// Where a puck's existing map is archived before it is overwritten. The
 /// directory docs/insight-map-lifecycle.md already names.
@@ -518,24 +369,16 @@ fn push_event(shared: &Shared, msg: String) {
     }
 }
 
-fn mtime(path: &str) -> Option<SystemTime> {
-    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
-}
 
 // ---- aggregation + drift monitoring ---------------------------------------
 
-/// "0.0.0.0:5180" + 2 -> "0.0.0.0:5182".
-fn bump_port(listen: &str, by: u16) -> String {
-    match listen.rsplit_once(':') {
-        Some((host, port)) => match port.parse::<u16>() {
-            Ok(p) => format!("{host}:{}", p + by),
-            Err(_) => format!("{host}:5182"),
-        },
-        None => "0.0.0.0:5182".into(),
-    }
-}
 
-fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: Arc<Shared>) -> Result<(), String> {
+/// Aggregate every puck's stream into the shared frame and emit it.
+///
+/// With a shared map there is no `T_map_world` to solve, so this is only:
+/// ingest -> apply each puck's LOCAL->world bridge -> emit. What remains
+/// besides that is event detection -- the things that invalidate a bridge.
+fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Result<(), String> {
     std::thread::Builder::new()
         .name("service-agg".into())
         .spawn(move || {
@@ -546,65 +389,32 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
                     return;
                 }
             };
-            let mut map_t = config::load_map_transforms(&cfg.transforms)
-                .unwrap_or_default();
-            let mut t_mtime = mtime(&cfg.transforms);
             let mut last_t: BTreeMap<u8, u64> = BTreeMap::new();
             let mut counts: BTreeMap<u8, u32> = BTreeMap::new();
             let mut window = Instant::now();
             let mut drift = DriftDetector::new();
             let epoch = Instant::now();
             let mut last_pose: BTreeMap<u8, (u64, [f32; 3])> = BTreeMap::new();
-            let mut move_hist: BTreeMap<u8, VecDeque<(Instant, [f32; 3])>> = BTreeMap::new();
-            let hip_ip: Option<String> = cfg.hip().map(|p| p.ip.clone());
-            let mut last_fold: Option<Instant> = None;
-            let mut last_hist_push = Instant::now();
-            let mut last_join_check = Instant::now();
-            // Continuous pairing: per puck, recent (map pose, insight pose)
-            // simultaneous observations. The window is the calibration --
-            // nothing stored can go stale, jumps roll out with the window.
-            let mut pairs: BTreeMap<u8, VecDeque<(Instant, crate::bridge::PosePair)>> =
-                BTreeMap::new();
-            let mut last_pair_t: BTreeMap<u8, u64> = BTreeMap::new();
-            let mut last_paircal = Instant::now();
-            let mut last_paircal_event: BTreeMap<String, Instant> = BTreeMap::new();
             let mut live_state: BTreeMap<u8, bool> = BTreeMap::new();
-            let mut last_auto_realign: Option<Instant> = None;
-            let ip_of: BTreeMap<u8, String> =
-                cfg.pucks.iter().map(|p| (p.device, p.ip.clone())).collect();
+            let mut ip_of: BTreeMap<u8, String> = BTreeMap::new();
+            let mut roster_seen = u64::MAX;
 
             loop {
-                if shared.rebuild.swap(false, Ordering::Relaxed) {
-                    map_t = config::load_map_transforms(&cfg.transforms)
-                        .unwrap_or_default();
-                    let bridges = config::load_bridges(&cfg.bridge).unwrap_or_default();
-                    // From the LIVE roster, so a role change applies without a
-                    // restart.
+                // Re-read the roster when it changes, so a role assignment
+                // takes effect without a restart. A stale roster does not
+                // merely fail to help: build_transforms would key off the OLD
+                // slot and the puck would vanish from the output silently.
+                let generation = shared.roster_gen.load(Ordering::Relaxed);
+                if generation != roster_seen || shared.rebuild.swap(false, Ordering::Relaxed) {
+                    roster_seen = generation;
                     let roster = shared.pucks.read().unwrap().clone();
-                    agg.transforms =
-                        config::build_transforms_for(&roster, cfg.colocated, &map_t, &bridges);
-                    // The on-puck verifier scores against the transform it was
-                    // last handed; a re-localization that does not reach it makes
-                    // it refute a CORRECT alignment. Push each fresh T off the
-                    // hot path (adb is slow), so the verifier and the aggregator
-                    // never disagree about which transform is live.
-                    for p in &cfg.pucks {
-                        if let Some(m) = map_t.get(&p.ip) {
-                            let (ip, yaw, t) = (p.ip.clone(), m.yaw_deg, m.t);
-                            std::thread::spawn(move || {
-                                fleet::push_map_transform(&ip, yaw, t).ok();
-                            });
-                        }
-                    }
+                    ip_of = roster.iter().map(|p| (p.device, p.ip.clone())).collect();
+                    let bridges = config::load_bridges(&cfg.bridge).unwrap_or_default();
+                    agg.transforms = config::build_transforms_for(&roster, &bridges);
                     // Any transform change moves everything; old statistics lie.
                     drift.reset();
                     last_pose.clear();
                     shared.view.lock().unwrap().drifted = false;
-                }
-                if mtime(&cfg.transforms) != t_mtime {
-                    t_mtime = mtime(&cfg.transforms);
-                    shared.rebuild.store(true, Ordering::Relaxed);
-                    push_event(&shared, "map transforms changed — reloading".into());
                 }
 
                 let summary = agg.tick(&ingest);
@@ -618,25 +428,24 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
 
                 // REBOOTS announce themselves on the stream: t_ns is the
                 // device's boot clock, so a fresh boot sends timestamps HOURS
-                // behind the ones before it. This is the detector the pose
-                // statistics can never be — deterministic, gap-proof, and
-                // exactly the event that invalidates the stored transform.
+                // behind the ones before it. A reboot resets the tracker's
+                // LOCAL frame, which is exactly what the bridge describes.
                 for smp in ingest.live() {
                     let d = smp.packet.device as u8;
                     if let Some(&(t_prev, _)) = last_pose.get(&d) {
                         if smp.packet.t_ns + 3_600_000_000_000 < t_prev {
                             if let Some(ip) = ip_of.get(&d) {
                                 push_event(&shared, format!(
-                                    "{ip} REBOOTED (boot clock regressed) — verifying alignment"));
+                                    "{ip} REBOOTED (boot clock regressed) — re-bridging"));
                                 last_pose.remove(&d);
-                                move_hist.remove(&d);
-                                request_verify(&shared, ip);
+                                shared.verify.lock().unwrap().insert(ip.clone());
                             }
                         }
                     }
                 }
+
                 // A tracker returning after a gap may have relocalized into a
-                // moved frame; a quick stationary verification settles it.
+                // moved frame; a quick stationary check settles it.
                 //
                 // The clone is bound to a local ON PURPOSE. Written as
                 // `for x in shared.view.lock().unwrap().slots.clone()`, the
@@ -657,17 +466,14 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
                     if now_live && was == Some(false) {
                         if let Some(ip) = ip_of.get(&d8) {
                             push_event(&shared, format!(
-                                "{ip} back after a gap — verifying alignment"));
-                            request_verify(&shared, ip);
+                                "{ip} back after a gap — verifying bridge"));
+                            shared.verify.lock().unwrap().insert(ip.clone());
                         }
                     }
                 }
 
                 // Teleports: a pose jumping faster than a human moves is a
-                // frame event. Route it to the bridge watchdog for an
-                // immediate verification — the check disambiguates a LOCAL
-                // jump (re-bridge fixes it) from an Insight-world jump (only
-                // a re-solve fixes it).
+                // frame event, not motion. Route it to the bridge watchdog.
                 for smp in ingest.live() {
                     let d = smp.packet.device as u8;
                     let p = smp.packet.pose.p;
@@ -679,20 +485,11 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
                                 + (p[2] - p_prev[2]).powi(2))
                             .sqrt();
                             if dist > TELEPORT_MIN_DIST && dist / dt > TELEPORT_SPEED {
-                                if let Some(ip) = cfg
-                                    .pucks
-                                    .iter()
-                                    .find(|pk| pk.device == d)
-                                    .map(|pk| pk.ip.clone())
-                                {
+                                if let Some(ip) = ip_of.get(&d) {
                                     if shared.verify.lock().unwrap().insert(ip.clone()) {
-                                        push_event(
-                                            &shared,
-                                            format!(
-                                                "{ip} pose jumped {dist:.2} m in {:.0} ms — verifying bridge",
-                                                dt * 1e3
-                                            ),
-                                        );
+                                        push_event(&shared, format!(
+                                            "{ip} pose jumped {dist:.2} m in {:.0} ms — verifying bridge",
+                                            dt * 1e3));
                                     }
                                 }
                             }
@@ -701,9 +498,10 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
                     last_pose.insert(d, (smp.packet.t_ns, p));
                 }
 
-                // Drift: separation change the pucks' own motion cannot
-                // explain. Carrying them apart is explained; a frame jump on
-                // either side is not.
+                // Drift: separation changing by more than the pucks' own motion
+                // can explain. Carrying them apart is explained; a frame jump on
+                // either side is not. With a shared map the usual cause is a
+                // stale bridge, so this reports rather than re-solves.
                 if let (Some(s), Some(sp)) = (summary.separation, summary.speed_sum) {
                     let t = epoch.elapsed().as_secs_f64();
                     if let Some(unexplained) = drift.push(t, s, sp) {
@@ -711,213 +509,10 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
                         if !view.drifted {
                             view.drifted = true;
                             drop(view);
-                            push_event(
-                                &shared,
-                                format!(
-                                    "separation moved {unexplained:.2} m with no motion to explain it — alignment drifted"
-                                ),
-                            );
+                            push_event(&shared, format!(
+                                "separation moved {unexplained:.2} m with no motion to explain it \
+                                 — hold the pucks still and re-bridge"));
                         }
-                    }
-                }
-
-                // Movement history: LOCAL-frame positions, ~10 Hz, for the
-                // join trigger's spread gate.
-                if last_hist_push.elapsed() >= Duration::from_millis(100) {
-                    last_hist_push = Instant::now();
-                    let now = Instant::now();
-                    let live1 = ingest.live();
-                    for smp in &live1 {
-                        let h = move_hist.entry(smp.packet.device as u8).or_default();
-                        h.push_back((now, smp.packet.pose.p));
-                        while h.front().map_or(false, |(t, _)| now - *t > JOIN_WINDOW) {
-                            h.pop_front();
-                        }
-                    }
-                    // Collect pose pairs: a fresh MPT2 (map-frame, valid) and a
-                    // fresh MPT1 (Insight world) for the same puck, both under
-                    // 80 ms old, while the puck is SLOW -- arrival-time pairing
-                    // has up to ~50 ms of skew, and gating on speed keeps that
-                    // skew's position error under a centimetre.
-                    for m2 in mpt2.live() {
-                        if !m2.packet.valid || m2.arrived.elapsed() > Duration::from_millis(80) {
-                            continue;
-                        }
-                        let dev = m2.packet.device as u8;
-                        if last_pair_t.get(&dev) == Some(&m2.packet.t_ns) {
-                            continue; // already paired this sample
-                        }
-                        let Some(m1) = live1.iter().find(|s| {
-                            s.packet.device as u8 == dev
-                                && s.packet.valid
-                                && s.arrived.elapsed() < Duration::from_millis(80)
-                        }) else { continue };
-                        let sp = (m1.packet.vel[0].powi(2) + m1.packet.vel[1].powi(2)
-                            + m1.packet.vel[2].powi(2)).sqrt();
-                        if sp > 0.3 {
-                            continue;
-                        }
-                        last_pair_t.insert(dev, m2.packet.t_ns);
-                        let q = pairs.entry(dev).or_default();
-                        q.push_back((now, crate::bridge::PosePair {
-                            world: m2.packet.pose,   // map frame
-                            local: m1.packet.pose,   // Insight world frame
-                        }));
-                        while q.len() > 64
-                            || q.front().map_or(false, |(t, _)| now - *t > Duration::from_secs(120))
-                        {
-                            q.pop_front();
-                        }
-                    }
-                    // Solve each puck's window once a second; the result IS
-                    // T_map_world and lands through the same transforms.json ->
-                    // rebuild path as every other alignment source.
-                    //
-                    // Colocated pucks need none of it: T_map_world is identity,
-                    // so a solve here would write a correction into a frame that
-                    // is already correct. build_transforms ignores the file in
-                    // this mode, but leaving the writer running would keep
-                    // rewriting entries that describe nothing being applied.
-                    if !cfg.colocated && last_paircal.elapsed() >= Duration::from_secs(1) {
-                        last_paircal = Instant::now();
-                        if std::env::var_os("INSIGHT_PAIRDBG").is_some() {
-                            let m2n = mpt2.live().len();
-                            let m1n = live1.len();
-                            let pn: Vec<usize> = pairs.values().map(|q| q.len()).collect();
-                            eprintln!("[pairdbg] mpt1_live={m1n} mpt2_live={m2n} windows={pn:?}");
-                        }
-                        for (dev, q) in &pairs {
-                            if q.len() < 8 { continue; }
-                            let ps: Vec<crate::bridge::PosePair> =
-                                q.iter().map(|(_, p)| *p).collect();
-                            let Some(sol) = crate::bridge::solve(&ps) else { continue };
-                            if sol.yaw_spread_deg > 1.5 || sol.t_spread_m > 0.10 {
-                                continue; // window not coherent yet
-                            }
-                            let Some(ip) = ip_of.get(dev) else { continue };
-                            let stored = config::load_map_transforms(&cfg.transforms)
-                                .and_then(|m| m.get(ip)
-                                    .map(|e| (e.yaw_deg, e.t,
-                                              e.frame.as_deref() == Some("local"))));
-                            let yaw_deg = sol.transform.yaw.to_degrees();
-                            // An entry not yet tagged frame=local MUST be
-                            // rewritten even if numerically close: the tag is
-                            // what stops the output path composing the bridge
-                            // on top of it.
-                            let moved = stored.map_or(true, |(sy, st, tagged)| {
-                                !tagged
-                                    || (yaw_deg - sy).abs() > 0.1
-                                    || ((sol.transform.t[0] - st[0]).powi(2)
-                                        + (sol.transform.t[1] - st[1]).powi(2)
-                                        + (sol.transform.t[2] - st[2]).powi(2))
-                                        .sqrt() > 0.01
-                            });
-                            if moved
-                                && apply_paircal(&cfg.transforms, ip,
-                                                 yaw_deg as f64, sol.transform.t,
-                                                 q.len() as i64)
-                            {
-                                if last_paircal_event.get(ip)
-                                    .map_or(true, |t| t.elapsed() > Duration::from_secs(30))
-                                {
-                                    push_event(&shared, format!(
-                                        "{ip} aligned by PAIR STREAM: yaw {yaw_deg:+.2}° \
-                                         ({} pairs, spread {:.2}°)",
-                                        sol.pairs, sol.yaw_spread_deg));
-                                }
-                                last_paircal_event.insert(ip.clone(), Instant::now());
-                                shared.paircal.lock().unwrap()
-                                    .insert(ip.clone(), Instant::now());
-                            }
-                        }
-                    }
-                }
-
-                // JOIN: a live puck with no map transform (a new or rebooted
-                // device) localizes itself as soon as it has moved enough for
-                // the query to carry viewpoint diversity. This is the whole
-                // point: joining the shared frame is walking, not a button.
-                if last_join_check.elapsed() >= Duration::from_secs(2) {
-                    last_join_check = Instant::now();
-                    for (dev, hist) in &move_hist {
-                        let Some(ip) = ip_of.get(dev) else { continue };
-                        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-                        for (_, p) in hist {
-                            for a in 0..3 {
-                                lo[a] = lo[a].min(p[a]);
-                                hi[a] = hi[a].max(p[a]);
-                            }
-                        }
-                        let spread = ((hi[0] - lo[0]).powi(2)
-                            + (hi[2] - lo[2]).powi(2))
-                        .sqrt();
-                        // The hip never joins (it IS the frame). Its natural
-                        // movement instead accrues the map: fold whenever it
-                        // has wandered enough, rate-limited. From-zero this
-                        // FOUNDS the map — no mapping step exists for the
-                        // user (docs/on-device-alignment.md).
-                        if hip_ip.as_deref() == Some(ip.as_str()) {
-                            if hist.len() > 20
-                                && spread > JOIN_SPREAD_M
-                                && last_fold.map_or(true, |t: Instant| t.elapsed() > FOLD_MIN_GAP)
-                                && request_kind(&shared, ip, false, false, LocKind::Fold)
-                            {
-                                last_fold = Some(Instant::now());
-                            }
-                            continue;
-                        }
-                        let has_t = map_t.contains_key(ip);
-                        if has_t && !shared.view.lock().unwrap().drifted {
-                            continue;
-                        }
-                        if hist.len() > 20 && spread > JOIN_SPREAD_M {
-                            if request_localize(&shared, ip, !has_t, false) {
-                                push_event(
-                                    &shared,
-                                    format!(
-                                        "{ip} moving ({spread:.1} m spread) — {}",
-                                        if has_t {
-                                            "re-localizing to clear drift"
-                                        } else {
-                                            "localizing into the map (join)"
-                                        }
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Re-solve: manual request always; drift only when opted in.
-                let (drifted, bridges_ok) = {
-                    let v = shared.view.lock().unwrap();
-                    let ok = v.bridges.iter().all(|(_, st, _)| {
-                        *st == crate::service::BridgeState::Ok
-                    });
-                    (v.drifted, ok)
-                };
-                let auto_due = cfg.auto_realign
-                    && drifted
-                    && bridges_ok
-                    && last_auto_realign.map_or(true, |t| t.elapsed() > AUTO_REALIGN_COOLDOWN);
-                let manual = shared.realign_now.swap(false, Ordering::Relaxed);
-                if manual || auto_due {
-                    last_auto_realign = Some(Instant::now());
-                    push_event(
-                        &shared,
-                        format!(
-                            "localize requested ({})",
-                            if manual { "MANUAL button press" } else { "AUTO: drift detected" }
-                        ),
-                    );
-                    for p in &cfg.pucks {
-                        // The hip IS the shared frame (identity by definition):
-                        // localizing it would try to place the reference into
-                        // itself and can only add noise. Ankles join to it.
-                        if p.is_hip() {
-                            continue;
-                        }
-                        request_localize(&shared, &p.ip, !map_t.contains_key(&p.ip), manual);
                     }
                 }
 
@@ -946,29 +541,8 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
                         })
                         .collect();
                     v.emitted = agg.emitted;
-                    v.colocated = cfg.colocated;
-                    v.jobs = shared.jobs.snapshot();
-                    // In colocated mode there IS no map transform: reporting a
-                    // stale stored yaw would describe a correction that is not
-                    // being applied, which is worse than reporting nothing.
-                    v.map_t = if cfg.colocated {
-                        Vec::new()
-                    } else {
-                        map_t
-                            .iter()
-                            .map(|(ip, m)| (ip.clone(), m.yaw_deg, m.unix_time == 0))
-                            .collect()
-                    };
                     v.n_transforms = agg.transforms.len();
-                    v.localizing =
-                        shared.loc.lock().unwrap().inflight.iter().cloned().collect();
-                    v.realign_running = !v.localizing.is_empty();
-                    if map_t.is_empty() && !cfg.colocated {
-                        v.error = Some(format!(
-                            "no {} — pucks will join on first walk (or seed it)",
-                            cfg.transforms
-                        ));
-                    }
+                    v.jobs = shared.jobs.snapshot();
                 }
                 std::thread::sleep(Duration::from_millis(4));
             }
@@ -977,694 +551,13 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
     Ok(())
 }
 
-/// Fold an on-device solve back into transforms.json. Read-modify-write of
-/// the raw JSON so fields this code does not model (role, residual) survive;
-/// atomic replace so the service's mtime watch only ever sees whole files —
-/// the update lands through the same rebuild path as any host localize.
-fn apply_feedback(path: &str, ip: &str, yaw_deg: f64, t: [f32; 3], inliers: i64) -> bool {
-    apply_transform_write(path, ip, yaw_deg, t, inliers, false, "on-device")
-}
 
-/// The pair stream is a PRIMARY alignment source: unlike q1verify feedback
-/// (which only refines an existing join), it may create a puck's entry -- the
-/// old machinery may have invalidated it, and the window solve is exactly the
-/// evidence that re-establishes the alignment.
-fn apply_paircal(path: &str, ip: &str, yaw_deg: f64, t: [f32; 3], pairs: i64) -> bool {
-    if !apply_transform_write(path, ip, yaw_deg, t, pairs, true, "paircal") {
-        return false;
-    }
-    // Mark the frame: this transform maps the tracker app's LOCAL directly
-    // into the map (the pair stream solves against MPT1 itself), so the
-    // output path must NOT compose the bridge on top.
-    let Ok(raw) = std::fs::read_to_string(path) else { return true };
-    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
-        if let Some(e) = v.get_mut(ip) {
-            e["frame"] = serde_json::json!("local");
-            let tmp = format!("{path}.tmp");
-            if std::fs::write(&tmp, serde_json::to_string_pretty(&v).unwrap_or_default()).is_ok() {
-                std::fs::rename(&tmp, path).ok();
-            }
-        }
-    }
-    true
-}
 
-fn apply_transform_write(path: &str, ip: &str, yaw_deg: f64, t: [f32; 3],
-                         inliers: i64, create: bool, source: &str) -> bool {
-    let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) else { return false };
-    if v.get(ip).is_none() {
-        if !create {
-            return false;
-        }
-        if let Some(o) = v.as_object_mut() {
-            o.insert(ip.into(), serde_json::json!({"role": "ankle"}));
-        }
-    }
-    let Some(entry) = v.get_mut(ip) else { return false };
-    entry["source"] = serde_json::json!(source);
-    entry["yaw_deg"] = serde_json::json!(yaw_deg);
-    entry["t"] = serde_json::json!(t);
-    entry["inliers"] = serde_json::json!(inliers);
-    entry["unix_time"] = serde_json::json!(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs()));
-    let tmp = format!("{path}.tmp");
-    if std::fs::write(&tmp, serde_json::to_string_pretty(&v).unwrap_or_default()).is_err() {
-        return false;
-    }
-    std::fs::rename(&tmp, path).is_ok()
-}
 
-/// The stored transform plus where it came from, so the poll can tell a
-/// high-confidence host join (the anchor) from its own on-device polish.
-fn stored_entry(path: &str, ip: &str) -> Option<(f64, [f32; 3], bool)> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let e = v.get(ip)?;
-    let y = e["yaw_deg"].as_f64()?;
-    let a = e["t"].as_array().filter(|a| a.len() == 3)?;
-    let t = [a[0].as_f64().unwrap_or(0.0) as f32,
-             a[1].as_f64().unwrap_or(0.0) as f32,
-             a[2].as_f64().unwrap_or(0.0) as f32];
-    Some((y, t, e["source"].as_str() == Some("on-device")))
-}
 
-/// Drop a puck's stored T_map_world. Called when its Insight frame jumps: the
-/// transform describes a frame that no longer exists, so every pose built from
-/// it is wrong. build_transforms then skips the puck entirely -- "an unaligned
-/// pose in an aligned stream is worse than a missing one" -- until a localize
-/// writes a fresh one. Never applied to the hip, whose transform is identity by
-/// definition.
-fn invalidate_transform(path: &str, ip: &str) -> bool {
-    let Ok(raw) = std::fs::read_to_string(path) else { return false };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) else { return false };
-    let Some(o) = v.as_object_mut() else { return false };
-    if o.remove(ip).is_none() {
-        return false;
-    }
-    let tmp = format!("{path}.tmp");
-    if std::fs::write(&tmp, serde_json::to_string_pretty(&v).unwrap_or_default()).is_err() {
-        return false;
-    }
-    std::fs::rename(&tmp, path).is_ok()
-}
 
-fn median(xs: &mut Vec<f64>) -> f64 {
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    xs[xs.len() / 2]
-}
 
-fn spawn_verifier_poll(cfg: Config, shared: Arc<Shared>) -> Result<(), String> {
-    std::thread::Builder::new()
-        .name("verify-poll".into())
-        .spawn(move || {
-            // Two consecutive refutes before acting: one snapshot can catch a
-            // bad instant (a hand across the cameras), and re-localization is
-            // not free. The on-puck verifier already gates on stillness, so a
-            // second refute means the frame really moved.
-            let mut refutes: BTreeMap<String, u32> = BTreeMap::new();
-            // Last seen q1serve capture counter per puck, for stall detection.
-            let mut frames: BTreeMap<String, u64> = BTreeMap::new();
-            // Convergence feedback: recent on-device solves per ankle, and the
-            // report stamp last ingested (so one file is never counted twice).
-            let mut feedback: BTreeMap<String, Vec<(f64, [f32; 3], i64)>> = BTreeMap::new();
-            let mut feedback_seen: BTreeMap<String, i64> = BTreeMap::new();
-            // The host cold-start solution per puck: the high-confidence anchor
-            // (it pools ~12 walked viewpoints) that on-device refinement is
-            // allowed to polish but never to walk away from. Seeded from any
-            // stored entry that is not itself on-device output.
-            let mut anchors: BTreeMap<String, (f64, [f32; 3])> = BTreeMap::new();
-            if let Ok(raw) = std::fs::read_to_string(&cfg.transforms) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    if let Some(o) = v.as_object() {
-                        for (ip, e) in o {
-                            if e["source"].as_str() == Some("on-device") { continue; }
-                            if let (Some(y), Some(t)) =
-                                (e["yaw_deg"].as_f64(), e["t"].as_array().filter(|a| a.len() == 3))
-                            {
-                                anchors.insert(ip.clone(), (y, [
-                                    t[0].as_f64().unwrap_or(0.0) as f32,
-                                    t[1].as_f64().unwrap_or(0.0) as f32,
-                                    t[2].as_f64().unwrap_or(0.0) as f32]));
-                            }
-                        }
-                    }
-                }
-            }
-            loop {
-                std::thread::sleep(Duration::from_secs(15));
-                // q1serve can stall with its process still alive, still
-                // answering 200, still holding port 8080 -- it just serves the
-                // last frame it ever captured, forever. Nothing downstream
-                // notices: the grab throws every stale snapshot out in its
-                // bracketing filter and reports "did not move enough", so the
-                // puck looks like it is simply sitting still no matter how far
-                // it is walked. Only a real capture counter shows it; see
-                // fleet::capture_counter for why the obvious fields do not.
-                for p in &cfg.pucks {
-                    // Ask what the snapshot endpoint is actually SERVING, not
-                    // whether counters move: a q1serve can climb `skipped`
-                    // forever while publishing one frozen frame, and that mode
-                    // silently starves every consumer (see snapshot_age_secs).
-                    let Some(age) = fleet::snapshot_age_secs(&p.ip) else { continue };
-                    if age > 5.0 {
-                        push_event(&shared, format!(
-                            "{} q1serve is serving a {age:.0}s-old frame (frozen) — \
-                             restarting; map growth and on-device solves are blind until it does",
-                            p.ip));
-                        fleet::restart_serving(&p.ip);
-                    }
-                }
-                let _ = &mut frames;
-                for p in &cfg.pucks {
-                    // A rebooted PANEL-LESS puck comes back at 0DOF until the
-                    // synthetic-TE module is reloaded, and it has no display
-                    // to show anything is wrong. Cheap no-op for panel pucks.
-                    let st = fleet::status(&p.ip);
-                    if st.reachable && fleet::ensure_sync_module(&p.ip, st.tracking_valid) {
-                        push_event(&shared, format!(
-                            "{} was 0DOF after reboot — synthetic-TE module reloaded", p.ip));
-                    }
-                    // A rebooted puck brings its tracker back by itself but not
-                    // the verifier (a bare binary, no boot receiver). Without
-                    // this the fleet looks healthy while nothing is verifying.
-                    let want_localize = !p.is_hip();
-                    if !fleet::verifier_running(&p.ip) {
-                        if fleet::restart_verifier(&p.ip, want_localize) {
-                            push_event(&shared, format!(
-                                "{} {} was not running — restarted", p.ip,
-                                if want_localize { "on-device localizer" } else { "verifier" }));
-                        }
-                        continue;
-                    }
-                    // Role and running mode must agree, or an ankle keeps
-                    // verifying (no feedback ever) / a hip keeps localizing
-                    // (against itself). Kill and restart in the right mode.
-                    if fleet::verifier_localizing(&p.ip) != want_localize {
-                        fleet::stop_verifier(&p.ip);
-                        if fleet::restart_verifier(&p.ip, want_localize) {
-                            push_event(&shared, format!(
-                                "{} restarted in {} mode to match its role", p.ip,
-                                if want_localize { "localize" } else { "verify" }));
-                        }
-                        continue;
-                    }
-                    // While the pair stream owns this puck's alignment, the
-                    // q1verify feedback loop stands down -- two writers with
-                    // different noise characteristics would fight.
-                    let pair_owned = shared.paircal.lock().unwrap()
-                        .get(&p.ip)
-                        .map_or(false, |t| t.elapsed() < Duration::from_secs(60));
-                    if want_localize && pair_owned {
-                        continue;  // the pair stream owns this puck entirely
-                    }
-                    if want_localize {
-                        // ---- ankle: the convergence feedback loop ----
-                        match fleet::localize_result(&p.ip) {
-                            Some((v, _, _, _, _)) if v == "no-input" => {
-                                if fleet::ensure_serving(&p.ip) {
-                                    push_event(&shared, format!(
-                                        "{} localizer had no frames — restarted q1serve", p.ip));
-                                }
-                            }
-                            Some((v, inl, yaw, t, stamp))
-                                if v == "localized" && inl >= FEEDBACK_MIN_INLIERS =>
-                            {
-                                refutes.remove(&p.ip);
-                                let seen = feedback_seen.get(&p.ip).copied().unwrap_or(0);
-                                if stamp > seen {
-                                    feedback_seen.insert(p.ip.clone(), stamp);
-                                    let q = feedback.entry(p.ip.clone()).or_default();
-                                    q.push((yaw, t, inl));
-                                    if q.len() > 8 { q.remove(0); }
-                                    if q.len() >= 3 {
-                                        let my = median(&mut q.iter().map(|e| e.0).collect());
-                                        let mt = [
-                                            median(&mut q.iter().map(|e| e.1[0] as f64).collect()) as f32,
-                                            median(&mut q.iter().map(|e| e.1[1] as f64).collect()) as f32,
-                                            median(&mut q.iter().map(|e| e.1[2] as f64).collect()) as f32,
-                                        ];
-                                        let minl = q.iter().map(|e| e.2).min().unwrap_or(0);
-                                        // A host localize rewrites this entry
-                                        // without the on-device marker; that is a
-                                        // fresh anchor and replaces the old one,
-                                        // or refinement would be measured against
-                                        // a transform nobody uses any more.
-                                        let stored = stored_entry(&cfg.transforms, &p.ip);
-                                        if let Some((sy, st, from_device)) = stored {
-                                            if !from_device {
-                                                anchors.insert(p.ip.clone(), (sy, st));
-                                            }
-                                            let dy = (my - sy).abs();
-                                            let dt = ((mt[0] - st[0]).powi(2)
-                                                + (mt[1] - st[1]).powi(2)
-                                                + (mt[2] - st[2]).powi(2))
-                                            .sqrt();
-                                            let busy = shared.loc.lock().unwrap()
-                                                .inflight.contains(&p.ip);
-                                            // Below the noise floor there is
-                                            // nothing to apply; churn would
-                                            // just jitter the output.
-                                            if !busy && (dy > 0.2 || dt > 0.03) {
-                                                // Step a FRACTION of the way and cap it:
-                                                // replacing outright turns the stored
-                                                // transform into a random walk over
-                                                // single-frame solves.
-                                                let clamp = |d: f64, m: f64| d.clamp(-m, m);
-                                                let ny = sy + clamp((my - sy) * FEEDBACK_GAIN,
-                                                                    FEEDBACK_MAX_STEP_DEG);
-                                                let mut nt = [0f32; 3];
-                                                for k in 0..3 {
-                                                    let d = (mt[k] - st[k]) as f64 * FEEDBACK_GAIN;
-                                                    nt[k] = st[k]
-                                                        + clamp(d, FEEDBACK_MAX_STEP_M) as f32;
-                                                }
-                                                // Anchor check: refinement that has wandered
-                                                // this far from the host join is not
-                                                // converging, and must not keep walking.
-                                                let anchor = anchors.get(&p.ip).copied();
-                                                let strayed = anchor.map_or(false, |(ay, at): (f64, [f32; 3])| {
-                                                    (ny - ay).abs() > FEEDBACK_MAX_DRIFT_DEG
-                                                        || (((nt[0] - at[0]).powi(2)
-                                                            + (nt[1] - at[1]).powi(2)
-                                                            + (nt[2] - at[2]).powi(2))
-                                                            .sqrt() as f64)
-                                                            > FEEDBACK_MAX_DRIFT_M
-                                                });
-                                                if strayed {
-                                                    push_event(&shared, format!(
-                                                        "{} on-device refinement drifted past the \
-                                                         host anchor — holding the stored transform \
-                                                         and re-localizing on next walk", p.ip));
-                                                    shared.view.lock().unwrap().drifted = true;
-                                                    request_localize(&shared, &p.ip, false, false);
-                                                    feedback.remove(&p.ip);
-                                                } else if apply_feedback(&cfg.transforms, &p.ip,
-                                                                  ny, nt, minl) {
-                                                    push_event(&shared, format!(
-                                                        "{} refined ON-DEVICE: yaw {:+.2}° \
-                                                         (Δ{:.2}° / Δ{:.0} mm of a {:.2}°/{:.0} mm \
-                                                         measurement, {} inliers)",
-                                                        p.ip, ny, ny - sy,
-                                                        ((nt[0] - st[0]).powi(2)
-                                                            + (nt[1] - st[1]).powi(2)
-                                                            + (nt[2] - st[2]).powi(2))
-                                                            .sqrt() * 1000.0,
-                                                        dy, dt * 1000.0, minl));
-                                                    fleet::push_map_transform(
-                                                        &p.ip, ny as f32, nt).ok();
-                                                    feedback.remove(&p.ip);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // `provisional` means one viewpoint; that is normal
-                            // for a parked puck and not evidence of anything, so
-                            // it neither refines nor accuses. It is skipped here
-                            // and falls through to the catch-all.
-                            Some((v, _, _, _, _)) if v == "provisional" => {}
-                            Some((v, _, _, _, stamp)) if v == "failed" => {
-                                // Count only NEW failed reports; a stale file
-                                // must not accumulate suspicion forever.
-                                let seen = feedback_seen.get(&p.ip).copied().unwrap_or(0);
-                                if stamp > seen {
-                                    feedback_seen.insert(p.ip.clone(), stamp);
-                                    let n = refutes.entry(p.ip.clone()).or_insert(0);
-                                    *n += 1;
-                                    if *n == 3 {
-                                        // Repeated failure with plenty of MATCHES but
-                                        // no inliers means the seed is wrong, not that
-                                        // the view is poor -- the puck's Insight frame
-                                        // moved under us (a relocalization after a
-                                        // tracking loss). The bridge cannot reveal it:
-                                        // if the tracker session restarted too, the
-                                        // watchdog re-bridges cleanly and consistency
-                                        // looks fine while T_map_world is stale. So do
-                                        // what a detected frame jump does -- stop
-                                        // emitting a wrong limb, and cold-start.
-                                        let dropped =
-                                            invalidate_transform(&cfg.transforms, &p.ip);
-                                        push_event(&shared, format!(
-                                            "{} cannot re-solve against the hip map (3 \
-                                             consecutive fails) — its Insight frame moved{}; \
-                                             WALK IT to re-join (sitting still cannot fix this)",
-                                            p.ip,
-                                            if dropped { ", output held" } else { "" }));
-                                        shared.view.lock().unwrap().drifted = true;
-                                        shared.rebuild.store(true, Ordering::Relaxed);
-                                        // Cold start: a moved frame makes the old
-                                        // transform useless as a seed.
-                                        request_localize(&shared, &p.ip, true, false);
-                                        feedback.remove(&p.ip);
-                                    }
-                                }
-                            }
-                            _ => {}  // moving / unknown / absent: hold
-                        }
-                        continue;
-                    }
-                    match fleet::verify_verdict(&p.ip) {
-                        // The verifier is alive but blind: its frame source
-                        // (q1serve) died, typically to the same reboot. Nothing
-                        // else repairs this -- the restart path only runs when
-                        // the VERIFIER is dead -- so a puck would sit reporting
-                        // no-input forever while looking alive.
-                        Some((v, _, _)) if v == "no-input" => {
-                            if fleet::ensure_serving(&p.ip) {
-                                push_event(&shared, format!(
-                                    "{} verifier had no frames — restarted q1serve", p.ip));
-                            }
-                        }
-                        Some((v, _, med)) if v == "refuted" => {
-                            let n = refutes.entry(p.ip.clone()).or_insert(0);
-                            *n += 1;
-                            if *n == 2 {
-                                // Only this branch runs for the HIP, and the hip
-                                // must never localize: it IS the map frame, so
-                                // "localizing" it solves it into its own map and
-                                // writes a non-identity transform, silently
-                                // moving the frame every other puck is aligned
-                                // to. A refuted hip means the MAP has fallen
-                                // behind the room, so fold its current view in
-                                // instead.
-                                if p.is_hip() {
-                                    push_event(&shared, format!(
-                                        "{} (hip) self-check refuted ({med:.1}° off) — the map \
-                                         has fallen behind the room; folding current view",
-                                        p.ip));
-                                    request_kind(&shared, &p.ip, false, false, LocKind::Fold);
-                                } else {
-                                    push_event(&shared, format!(
-                                        "{} self-check refuted twice ({med:.1}° off) — \
-                                         re-localizing on next walk", p.ip));
-                                    shared.view.lock().unwrap().drifted = true;
-                                    request_localize(&shared, &p.ip,
-                                        !config::load_map_transforms(&cfg.transforms)
-                                            .map_or(false, |m| m.contains_key(&p.ip)),
-                                        false);
-                                }
-                                refutes.remove(&p.ip);
-                            }
-                        }
-                        Some((v, _, _)) if v == "confirmed" => {
-                            refutes.remove(&p.ip);
-                        }
-                        _ => {}  // unknown / moving / absent: hold the count
-                    }
-                }
-            }
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
 
-fn spawn_mapd(cfg: Config, shared: Arc<Shared>) -> Result<(), String> {
-    let (tx, rx) = mpsc::channel::<LocReq>();
-    shared.loc.lock().unwrap().tx = Some(tx);
-    std::thread::Builder::new()
-        .name("mapd".into())
-        .spawn(move || {
-            let mut child: Option<(Child, std::process::ChildStdin, BufReader<std::process::ChildStdout>)> = None;
-            let spawn = |shared: &Shared| -> Option<(Child, std::process::ChildStdin, BufReader<std::process::ChildStdout>)> {
-                if !std::path::Path::new(&cfg.map).join("landmarks.npz").exists() {
-                    return None;
-                }
-                match Command::new(".venv/bin/python")
-                    .args(["tools/q1mapd.py", "daemon", "--map", &cfg.map,
-                           "--transforms", &cfg.transforms])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                {
-                    Ok(mut c) => {
-                        let stdin = c.stdin.take().unwrap();
-                        let stdout = BufReader::new(c.stdout.take().unwrap());
-                        push_event(shared, "map daemon started".into());
-                        Some((c, stdin, stdout))
-                    }
-                    Err(e) => {
-                        push_event(shared, format!("cannot start q1mapd: {e}"));
-                        None
-                    }
-                }
-            };
-            for req in rx {
-                let done = |shared: &Shared, ip: &str| {
-                    shared.loc.lock().unwrap().inflight.remove(ip);
-                };
-                // A Fold with no map yet FOUNDS it via the CLI (the daemon
-                // can only start once landmarks.npz exists) — the whole point
-                // of accumulation is that no one runs a bootstrap by hand.
-                let founding = req.kind == LocKind::Fold
-                    && !std::path::Path::new(&cfg.map).join("landmarks.npz").exists();
-                if child.is_none() && !founding {
-                    child = spawn(&shared);
-                    if child.is_none() {
-                        if req.kind != LocKind::Fold {
-                            push_event(&shared, format!(
-                                "no map yet at {} — it founds itself when the hip moves", cfg.map));
-                        }
-                        done(&shared, &req.ip);
-                        continue;
-                    }
-                }
-                // 1. Grab a query. A verify grab is a quick stationary glance
-                //    (2 snapshots, ~5 s); a localize grab needs walking and
-                //    fails safe if the puck stops moving.
-                let mode = if req.kind == LocKind::Verify { "verify" } else { "localize" };
-                let dir_tag = match req.kind {
-                    LocKind::Verify => "verify",
-                    LocKind::Localize => "localize",
-                    LocKind::Fold => "fold",
-                };
-                // Distinct dir per kind: a verify's 2-snapshot glance used to
-                // land on the same path as a localize grab and silently
-                // destroy it -- which cost the post-mortem evidence the first
-                // time a localization asymmetry needed diagnosing.
-                let out = format!("/tmp/insight_prime_{}_{}", dir_tag, req.ip.replace('.', "_"));
-                let grab = Command::new(".venv/bin/python")
-                    .args(["tools/q1grab.py", &req.ip, "--out", &out, "--mode", mode])
-                    .output();
-                let grab_ok = grab
-                    .as_ref()
-                    .ok()
-                    .and_then(|o| {
-                        serde_json::from_slice::<serde_json::Value>(&o.stdout).ok()
-                    })
-                    .map_or(false, |v| v["ok"].as_bool().unwrap_or(false));
-                if !grab_ok {
-                    // A fold's movement can simply stop between the trigger
-                    // and the grab; that is normal, not news — it re-fires.
-                    if req.kind != LocKind::Fold {
-                        push_event(&shared, if req.kind == LocKind::Verify {
-                            format!("{}: verification grab failed (snapshots unavailable)", req.ip)
-                        } else {
-                            format!("{}: grab yielded too little movement — will retry when walking", req.ip)
-                        });
-                    }
-                    done(&shared, &req.ip);
-                    continue;
-                }
-
-                if req.kind == LocKind::Verify {
-                    let request = serde_json::json!({
-                        "cmd": "verify", "puck": req.ip, "dataset": out,
-                    });
-                    let reply: Option<serde_json::Value> = (|| {
-                        let (_, stdin, stdout) = child.as_mut()?;
-                        writeln!(stdin, "{request}").ok()?;
-                        let mut line = String::new();
-                        stdout.read_line(&mut line).ok()?;
-                        if line.is_empty() { return None; }
-                        serde_json::from_str(&line).ok()
-                    })();
-                    match reply.as_ref().and_then(|r| r["verdict"].as_str()) {
-                        Some("confirmed") => push_event(&shared, format!(
-                            "{} alignment CONFIRMED against the map ({} matches, {:.1}° median)",
-                            req.ip,
-                            reply.as_ref().unwrap()["matches"].as_i64().unwrap_or(0),
-                            reply.as_ref().unwrap()["median_deg"].as_f64().unwrap_or(99.0))),
-                        Some("refuted") => {
-                            let med = reply.as_ref().unwrap()["median_deg"]
-                                .as_f64()
-                                .unwrap_or(99.0);
-                            let common_mode = {
-                                let mut v = shared.verdicts.lock().unwrap();
-                                let similar = v.iter().any(|(ip, (m, t))| {
-                                    ip != &req.ip
-                                        && t.elapsed() < Duration::from_secs(600)
-                                        && (m - med).abs() < 1.5
-                                });
-                                v.insert(req.ip.clone(), (med, Instant::now()));
-                                similar
-                            };
-                            if common_mode {
-                                push_event(&shared, format!(
-                                    "{} off the map by {med:.1}° — SAME offset as its peer:                                      common-mode map drift, relative alignment intact.                                      Refreshes on next walk; playspace cal absorbs it meanwhile.",
-                                    req.ip));
-                            } else {
-                                push_event(&shared, format!(
-                                    "{} alignment REFUTED by the map ({med:.1}° off) —                                      walk the puck to re-localize", req.ip));
-                            }
-                            // Either way, arm re-localization on movement.
-                            shared.view.lock().unwrap().drifted = true;
-                        }
-                        Some(_) => push_event(&shared, format!(
-                            "{}: alignment unverifiable from here (scene coverage) —                              will confirm on movement", req.ip)),
-                        None => {
-                            push_event(&shared, "map daemon died — restarting".into());
-                            if let Some((mut c, _, _)) = child.take() {
-                                c.kill().ok();
-                                c.wait().ok();
-                            }
-                        }
-                    }
-                    done(&shared, &req.ip);
-                    continue;
-                }
-                if req.kind == LocKind::Fold {
-                    if founding {
-                        let r = Command::new(".venv/bin/python")
-                            .args(["tools/q1mapd.py", "bootstrap", "--map", &cfg.map,
-                                   "--captures", &out, "--stride", "1"])
-                            .output();
-                        let n = r.ok()
-                            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-                            .and_then(|v| v["landmarks"].as_i64())
-                            .unwrap_or(0);
-                        push_event(&shared, if n > 0 {
-                            format!("hip map FOUNDED from natural movement ({n} landmarks) —                                      ankles join as they move")
-                        } else {
-                            "hip map founding produced nothing usable — retrying on movement".into()
-                        });
-                        done(&shared, &req.ip);
-                        continue;
-                    }
-                    let ankles: Vec<String> = cfg.pucks.iter()
-                        .filter(|p| !p.is_hip())
-                        .map(|p| p.ip.clone())
-                        .collect();
-                    let request = serde_json::json!({
-                        "cmd": "fold", "dataset": out, "deploy_to": ankles,
-                    });
-                    let reply: Option<serde_json::Value> = (|| {
-                        let (_, stdin, stdout) = child.as_mut()?;
-                        writeln!(stdin, "{request}").ok()?;
-                        let mut line = String::new();
-                        stdout.read_line(&mut line).ok()?;
-                        if line.is_empty() { return None; }
-                        serde_json::from_str(&line).ok()
-                    })();
-                    match reply {
-                        Some(r) if r["ok"].as_bool().unwrap_or(false) => {
-                            push_event(&shared, format!(
-                                "hip map now {} landmarks (+{} from natural movement);                                  subset refreshed on {} puck(s)",
-                                r["landmarks"].as_i64().unwrap_or(0),
-                                r["grew"].as_i64().unwrap_or(0),
-                                r["deployed"].as_array().map_or(0, |a| a.len())));
-                        }
-                        Some(r) => push_event(&shared, format!(
-                            "hip map fold failed: {}",
-                            r["error"].as_str().unwrap_or("?"))),
-                        None => {
-                            push_event(&shared, "map daemon died — restarting".into());
-                            if let Some((mut c, _, _)) = child.take() {
-                                c.kill().ok();
-                                c.wait().ok();
-                            }
-                        }
-                    }
-                    done(&shared, &req.ip);
-                    continue;
-                }
-                // 2. Ask the daemon. Seed from the current store unless this
-                //    is a cold start (new puck, no basin to guide from).
-                let seed = config::load_map_transforms(&cfg.transforms)
-                    .and_then(|m| m.get(&req.ip).map(|t| (t.yaw_deg, t.t)));
-                let coldstart = req.coldstart || seed.is_none();
-                let request = serde_json::json!({
-                    "cmd": "localize", "puck": req.ip, "dataset": out,
-                    "coldstart": coldstart,
-                    "seed": seed.map(|(y, t)| serde_json::json!({"yaw_deg": y, "t": t})),
-                });
-                let reply: Option<serde_json::Value> = (|| {
-                    let (_, stdin, stdout) = child.as_mut()?;
-                    writeln!(stdin, "{request}").ok()?;
-                    let mut line = String::new();
-                    stdout.read_line(&mut line).ok()?;
-                    if line.is_empty() {
-                        return None; // EOF: daemon died
-                    }
-                    serde_json::from_str(&line).ok()
-                })();
-                // While the pair stream owns this puck, a host localize may
-                // still run (it was queued before ownership), but its WRITE
-                // must not stomp the live pair alignment -- the daemon already
-                // wrote transforms.json, so restore ownership by letting the
-                // next window solve overwrite; here we just skip the seed push
-                // and drop our claim to the event. (Deleting this path
-                // entirely is the endgame; the guard keeps the A/B honest.)
-                let pair_owned_now = shared.paircal.lock().unwrap()
-                    .get(&req.ip)
-                    .map_or(false, |t| t.elapsed() < Duration::from_secs(60));
-                match reply {
-                    Some(ref r) if r["accepted"].as_bool().unwrap_or(false) && pair_owned_now => {
-                        push_event(&shared, format!(
-                            "{}: host localize finished but the pair stream owns this puck — result ignored",
-                            req.ip));
-                    }
-                    Some(r) if r["accepted"].as_bool().unwrap_or(false) => {
-                        push_event(&shared, format!(
-                            "{} localized: yaw {:+.2}° ({} inliers, {:.2}° residual{})",
-                            req.ip,
-                            r["yaw_deg"].as_f64().unwrap_or(f64::NAN),
-                            r["inliers"].as_i64().unwrap_or(0),
-                            r["residual_deg"].as_f64().unwrap_or(f64::NAN),
-                            if r["contribute_ok"].as_bool().unwrap_or(false)
-                                { "" } else { " — use-grade, not map-grade" }));
-                        // Hand the puck the seed for its ON-DEVICE re-join, so
-                        // drift recovery during play runs on the 835 instead of
-                        // the VR host (docs/on-device-alignment.md). The map
-                        // subset + verifycfg are deployed by q1hipref at join;
-                        // this keeps the seed in step with every new solve.
-                        if let (Some(y), Some(t)) = (
-                            r["yaw_deg"].as_f64(),
-                            r["t"].as_array().filter(|a| a.len() == 3)) {
-                            let tt = [t[0].as_f64().unwrap_or(0.0) as f32,
-                                      t[1].as_f64().unwrap_or(0.0) as f32,
-                                      t[2].as_f64().unwrap_or(0.0) as f32];
-                            fleet::push_map_transform(&req.ip, y as f32, tt).ok();
-                        }
-                        // transforms.json was written by the daemon; the
-                        // mtime watch applies it through the rebuild path.
-                    }
-                    Some(r) => {
-                        push_event(&shared, format!(
-                            "{}: localization rejected ({}) — keeping current transform",
-                            req.ip,
-                            r["reject_reason"].as_str().map(String::from)
-                                .unwrap_or_else(|| format!(
-                                    "{} inliers", r["inliers"].as_i64().unwrap_or(0)))));
-                    }
-                    None => {
-                        push_event(&shared, "map daemon died — restarting".into());
-                        if let Some((mut c, _, _)) = child.take() {
-                            c.kill().ok();
-                            c.wait().ok();
-                        }
-                    }
-                }
-                done(&shared, &req.ip);
-            }
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
 
 // ---- bridge watchdog -------------------------------------------------------
 
@@ -1867,40 +760,16 @@ fn spawn_bridge_watchdog(
                                 // it is replaced is wrong with it.
                                 w.state = BridgeState::Suspect;
                                 w.suspect = 0;
-                                let is_hip = shared.hip_ip.as_deref() == Some(w.ip.as_str());
-                                if is_hip {
-                                    // The map lives in the HIP's world frame, so
-                                    // a hip jump moves the shared frame itself:
-                                    // every ankle's transform is stale at once.
-                                    push_event(&shared, format!(
-                                        "{} (hip) Insight frame JUMPED ({dp:.2} m / {dyaw:.1}°) — \
-                                         the shared frame moved; re-bridging, folding the map, \
-                                         and re-joining every ankle", w.ip));
-                                    request_kind(&shared, &w.ip, false, false, LocKind::Fold);
-                                    shared.view.lock().unwrap().drifted = true;
-                                    for q in &cfg.pucks {
-                                        if !q.is_hip() {
-                                            request_localize(&shared, &q.ip, true, false);
-                                        }
-                                    }
-                                } else {
-                                    // Stop emitting this puck until it re-joins:
-                                    // its transform maps from a frame that no
-                                    // longer exists, so every pose from it is
-                                    // wrong, and a wrong limb is worse than a
-                                    // missing one.
-                                    let dropped = invalidate_transform(&cfg.transforms, &w.ip);
-                                    push_event(&shared, format!(
-                                        "{} Insight frame JUMPED ({dp:.2} m / {dyaw:.1}°) — \
-                                         its stored alignment no longer applies{}; re-bridging \
-                                         and re-joining on next movement", w.ip,
-                                        if dropped { ", output held" } else { "" }));
-                                    shared.view.lock().unwrap().drifted = true;
-                                    shared.rebuild.store(true, Ordering::Relaxed);
-                                    // Cold-start: the old transform is not a
-                                    // valid seed for a frame that moved.
-                                    request_localize(&shared, &w.ip, true, false);
-                                }
+                                // With a shared map there is no stored
+                                // per-puck transform to invalidate: an Insight
+                                // frame jump means this puck's LOCAL->world
+                                // bridge describes a frame that no longer
+                                // exists, and re-bridging is the whole fix.
+                                push_event(&shared, format!(
+                                    "{} Insight frame JUMPED ({dp:.2} m / {dyaw:.1}\u{00b0}) — \
+                                     its bridge no longer applies; re-bridging when still",
+                                    w.ip));
+                                shared.view.lock().unwrap().drifted = true;
                             } else if dp > BRIDGE_POS_TOL || dyaw > BRIDGE_YAW_TOL {
                                 w.suspect += 1;
                                 if w.suspect >= 2 {
@@ -2004,38 +873,6 @@ mod tests {
                 "change across a stream gap is unjudgeable, not drift"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod frame_jump_tests {
-    use super::*;
-
-    /// A jumped puck must vanish from the store (so build_transforms stops
-    /// emitting it) while every other puck is left untouched.
-    #[test]
-    fn invalidate_drops_only_the_jumped_puck() {
-        let dir = std::env::temp_dir().join("insight_prime_fj_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("transforms.json");
-        let p = path.to_str().unwrap();
-        std::fs::write(p, r#"{
-            "1.1.1.1": {"yaw_deg": 0.0, "t": [0.0,0.0,0.0], "role": "hip"},
-            "2.2.2.2": {"yaw_deg": -59.9, "t": [1.0,2.0,3.0], "role": "ankle"}
-        }"#).unwrap();
-
-        assert!(invalidate_transform(p, "2.2.2.2"));
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-        assert!(v.get("2.2.2.2").is_none(), "jumped puck must be dropped");
-        assert!(v.get("1.1.1.1").is_some(), "the hip must survive");
-
-        // Dropping an absent puck is a no-op, not a corruption.
-        assert!(!invalidate_transform(p, "2.2.2.2"));
-        let v2: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-        assert!(v2.get("1.1.1.1").is_some());
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
