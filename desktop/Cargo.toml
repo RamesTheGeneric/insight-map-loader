@@ -1,5 +1,5 @@
 [workspace]
-members = ["insight-prime-core", "insight-prime-gui"]
+members = ["insight-map-loader-core", "insight-map-loader-gui"]
 resolver = "2"
 
 [workspace.package]

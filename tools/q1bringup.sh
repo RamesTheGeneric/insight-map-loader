@@ -17,8 +17,8 @@
 #   ./tools/q1bringup.sh <ip> [options]
 #
 #     --apk <path>     install/update the tracker APK first
-#     --device <0-10>  SteamVR role id; also adds the puck to insight-prime.json
-#     --config <file>  config to edit          (default insight-prime.json)
+#     --device <0-10>  SteamVR role id; also adds the puck to insight-map-loader.json
+#     --config <file>  config to edit          (default insight-map-loader.json)
 #     --usb <serial>   enable wifi adb over USB first, for a puck not yet on wifi
 #     --no-wait        skip the 45 s appop flush (then do NOT reboot straight away)
 #
@@ -31,7 +31,7 @@ cd "$(dirname "$(readlink -f "$0")")/.."   # repo root
 TRACKER_PKG=com.mapperlocalizer.questtracker
 GUARDIAN_PKG=com.oculus.guardian
 
-IP=""; APK=""; DEVICE=""; CONFIG=insight-prime.json; USB=""; WAIT=1
+IP=""; APK=""; DEVICE=""; CONFIG=insight-map-loader.json; USB=""; WAIT=1
 FAILED=0
 
 say()  { printf '%s\n' "$*" >&2; }
@@ -186,7 +186,7 @@ print(f"  \033[32m✔\033[0m {msg}", file=sys.stderr)
 PY
     [ $? -eq 0 ] || FAILED=1
   else
-    bad "no $CONFIG -- copy desktop/insight-prime.example.json and set your host IP"
+    bad "no $CONFIG -- copy desktop/insight-map-loader.example.json and set your host IP"
   fi
 else
   warn "no --device given; add it to $CONFIG yourself (role table in docs/puck-bringup.md)"
@@ -223,7 +223,7 @@ cat >&2 <<TXT
   9. bridge               hold the pucks still  ->  ⌖ Bridge now
  10. assign its role      the dropdown on its card;  ⚑ identifies it by flash count
 
-  check:  ./desktop/target/release/insight-prime mapdb     # every puck on the same root
+  check:  ./desktop/target/release/insight-map-loader mapdb     # every puck on the same root
           tools/q1sep.py                            # ~3 cm with two pucks held together
 
   docs/puck-bringup.md has the reasoning for each step.

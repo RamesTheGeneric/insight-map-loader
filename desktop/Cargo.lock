@@ -1509,7 +1509,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "insight-prime-core"
+name = "insight-map-loader-core"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1517,11 +1517,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "insight-prime-gui"
+name = "insight-map-loader-gui"
 version = "0.1.0"
 dependencies = [
  "eframe",
- "insight-prime-core",
+ "insight-map-loader-core",
  "serde_json",
 ]
 

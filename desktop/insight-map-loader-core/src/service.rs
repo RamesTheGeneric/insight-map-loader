@@ -356,8 +356,8 @@ impl Service {
 fn map_backup_dir() -> std::path::PathBuf {
     std::env::var_os("INSIGHT_MAP_BACKUPS")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("insight-prime-backups")))
-        .unwrap_or_else(|| std::path::PathBuf::from("insight-prime-backups"))
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("insight-map-loader-backups")))
+        .unwrap_or_else(|| std::path::PathBuf::from("insight-map-loader-backups"))
 }
 
 fn push_event(shared: &Shared, msg: String) {
@@ -1174,7 +1174,7 @@ fn create_map_job(
 
 /// Assign a new SteamVR role to a puck and make it take effect.
 ///
-/// The `device` id IS the role, so this rewrites insight-prime.json, updates the live
+/// The `device` id IS the role, so this rewrites insight-map-loader.json, updates the live
 /// roster and pushes the new slot to the puck. Without the roster update the
 /// change is worse than useless: `build_transforms` keys off the OLD slot, the
 /// aggregator finds no transform for the new one, and the puck vanishes from

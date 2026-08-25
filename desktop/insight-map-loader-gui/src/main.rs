@@ -1,6 +1,6 @@
-//! insight-prime-gui — the control surface for the puck fleet.
+//! insight-map-loader-gui — the control surface for the puck fleet.
 //!
-//! All behaviour lives in insight-prime-core::service, which runs the ingest, the
+//! All behaviour lives in insight-map-loader-core::service, which runs the ingest, the
 //! aggregation, the bridge watchdog and the drift monitor on its own threads.
 //! This window paints that service's view and forwards button presses to the
 //! same flags the watchdogs use themselves — the buttons are overrides, not
@@ -12,12 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
-use insight_prime_core::config::Config;
-use insight_prime_core::ingest::SlotState;
-use insight_prime_core::mpt1::Device;
-use insight_prime_core::jobs::{JobState, StepState};
-use insight_prime_core::service::{BridgeState, Service};
-use insight_prime_core::fleet;
+use insight_map_loader_core::config::Config;
+use insight_map_loader_core::ingest::SlotState;
+use insight_map_loader_core::mpt1::Device;
+use insight_map_loader_core::jobs::{JobState, StepState};
+use insight_map_loader_core::service::{BridgeState, Service};
+use insight_map_loader_core::fleet;
 
 /// A stable colour per role. The first three keep the colours they have always
 /// had, so existing habits and screenshots still read correctly; the rest are
@@ -62,7 +62,7 @@ struct FleetRow {
 struct App {
     cfg: Config,
     /// The file roles are written back to. main() used to drop this, which
-    /// would send a `--config other.json` launch's edits to insight-prime.json.
+    /// would send a `--config other.json` launch's edits to insight-map-loader.json.
     cfg_path: String,
     service: Service,
     fleet_rows: Arc<Mutex<Vec<FleetRow>>>,
@@ -228,7 +228,7 @@ impl App {
                         egui::ComboBox::from_id_salt(("role", &r.ip))
                             .selected_text(cur.map_or("?".to_string(), |d| d.pretty().to_string()))
                             .show_ui(ui, |ui| {
-                                for d in insight_prime_core::mpt1::ALL_DEVICES {
+                                for d in insight_map_loader_core::mpt1::ALL_DEVICES {
                                     let id = d as u8;
                                     // A duplicate would make two pucks fight
                                     // over one tracker at packet rate.
@@ -684,28 +684,28 @@ fn main() -> eframe::Result<()> {
         && std::env::var_os("INSIGHT_FORCE_WAYLAND").is_none()
     {
         std::env::remove_var("WAYLAND_DISPLAY");
-        eprintln!("insight-prime-gui: using X11/XWayland (Wayland backend busy-loops;                    set INSIGHT_FORCE_WAYLAND=1 to override)");
+        eprintln!("insight-map-loader-gui: using X11/XWayland (Wayland backend busy-loops;                    set INSIGHT_FORCE_WAYLAND=1 to override)");
     }
     let cfg_path = std::env::args()
         .skip_while(|a| a != "--config")
         .nth(1)
-        .unwrap_or_else(|| "insight-prime.json".into());
+        .unwrap_or_else(|| "insight-map-loader.json".into());
     let cfg = match Config::load(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("cannot read {cfg_path}: {e}");
-            eprintln!("copy desktop/insight-prime.example.json to insight-prime.json and run from the repo root");
+            eprintln!("copy desktop/insight-map-loader.example.json to insight-map-loader.json and run from the repo root");
             std::process::exit(2);
         }
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 760.0])
-            .with_title("insight-prime"),
+            .with_title("insight-map-loader"),
         ..Default::default()
     };
     eframe::run_native(
-        "insight-prime",
+        "insight-map-loader",
         options,
         Box::new(|_cc| {
             let app = App::new(cfg, cfg_path.clone()).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {

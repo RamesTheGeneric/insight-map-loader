@@ -1,6 +1,6 @@
 # Third-party components
 
-Insight Prime is GPL-3.0. The components below are included or depended upon
+Insight Map Loader is GPL-3.0. The components below are included or depended upon
 under their own terms.
 
 ## Vendored in this repository
@@ -18,8 +18,8 @@ build the driver.
 | Component | Used by | Licence |
 |---|---|---|
 | OpenXR loader | `android/q1tracker` (Maven) | Apache-2.0 |
-| `eframe` / `egui` | `desktop/insight-prime-gui` | MIT / Apache-2.0 |
-| `serde`, `serde_json` | `desktop/insight-prime-core` | MIT / Apache-2.0 |
+| `eframe` / `egui` | `desktop/insight-map-loader-gui` | MIT / Apache-2.0 |
+| `serde`, `serde_json` | `desktop/insight-map-loader-core` | MIT / Apache-2.0 |
 | numpy | `tools/insightmap` | BSD-3-Clause |
 
 Full Rust dependency licences: `cargo tree --format '{p} {l}'` in `desktop/`.

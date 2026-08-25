@@ -10,8 +10,8 @@
 
 use std::time::{Duration, Instant};
 
-use insight_prime_core::ingest::SlotState;
-use insight_prime_core::{Device, Ingest};
+use insight_map_loader_core::ingest::SlotState;
+use insight_map_loader_core::{Device, Ingest};
 
 fn main() -> std::io::Result<()> {
     let port: u16 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(5180);

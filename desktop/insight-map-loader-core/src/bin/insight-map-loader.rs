@@ -1,13 +1,13 @@
-//! insight-prime — bring up the pucks, bridge their frames, stream them as one.
+//! insight-map-loader — bring up the pucks, bridge their frames, stream them as one.
 //!
-//!     insight-prime status              what every puck is doing, one line each
-//!     insight-prime up                  connect + configure + launch the trackers
-//!     insight-prime bridge              measure each puck's LOCAL→world transform
-//!     insight-prime run                 ingest → align → emit shared-frame MPT1
-//!     insight-prime identify            blink every puck's LED in its slot colour
-//!     insight-prime provision           one-time: make every puck stream after any boot
+//!     insight-map-loader status              what every puck is doing, one line each
+//!     insight-map-loader up                  connect + configure + launch the trackers
+//!     insight-map-loader bridge              measure each puck's LOCAL→world transform
+//!     insight-map-loader run                 ingest → align → emit shared-frame MPT1
+//!     insight-map-loader identify            blink every puck's LED in its slot colour
+//!     insight-map-loader provision           one-time: make every puck stream after any boot
 //!
-//! Config is insight-prime.json (see insight-prime.example.json). The alignment transform
+//! Config is insight-map-loader.json (see insight-map-loader.example.json). The alignment transform
 //! comes from align_result.json, produced by tools/align_pool.py (cold start)
 //! and tools/align_map.py (refresh); `run` reloads it when the file changes,
 //! so a re-solve lands without restarting the service.
@@ -15,11 +15,11 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use insight_prime_core::bridge::{self, PosePair};
-use insight_prime_core::ingest::{Ingest, SlotState};
-use insight_prime_core::mpt1::Device;
-use insight_prime_core::config::Config;
-use insight_prime_core::fleet;
+use insight_map_loader_core::bridge::{self, PosePair};
+use insight_map_loader_core::ingest::{Ingest, SlotState};
+use insight_map_loader_core::mpt1::Device;
+use insight_map_loader_core::config::Config;
+use insight_map_loader_core::fleet;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -29,13 +29,13 @@ fn main() {
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .cloned()
-        .unwrap_or_else(|| "insight-prime.json".into());
+        .unwrap_or_else(|| "insight-map-loader.json".into());
 
     let cfg = match Config::load(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("cannot read {cfg_path}: {e}");
-            eprintln!("copy desktop/insight-prime.example.json to insight-prime.json and edit it");
+            eprintln!("copy desktop/insight-map-loader.example.json to insight-map-loader.json and edit it");
             std::process::exit(2);
         }
     };
@@ -49,7 +49,7 @@ fn main() {
         "provision" => provision(&cfg),
         "mapdb" => mapdb_cmd(&cfg),
         _ => {
-            eprintln!("usage: insight-prime [status|up|bridge|run|identify|provision|mapdb] [--config insight-prime.json]");
+            eprintln!("usage: insight-map-loader [status|up|bridge|run|identify|provision|mapdb] [--config insight-map-loader.json]");
             std::process::exit(2);
         }
     }
@@ -124,7 +124,7 @@ fn provision(cfg: &Config) {
         if all {
             "Done. Power-cycle a puck to confirm: it should appear in the stream unaided."
         } else {
-            "Some pucks are not provisioned; they still need `insight-prime up` after a boot."
+            "Some pucks are not provisioned; they still need `insight-map-loader up` after a boot."
         }
     );
 }
@@ -180,7 +180,7 @@ fn up(cfg: &Config) {
             Err(e) => println!("configure failed: {e}"),
         }
     }
-    println!("give the XR sessions ~10 s, then `insight-prime bridge`");
+    println!("give the XR sessions ~10 s, then `insight-map-loader bridge`");
 }
 
 fn bridge_cmd(cfg: &Config) -> i32 {
@@ -243,7 +243,7 @@ fn bridge_cmd(cfg: &Config) -> i32 {
 }
 
 fn run(cfg: &Config) -> i32 {
-    let service = match insight_prime_core::service::Service::start(cfg.clone()) {
+    let service = match insight_map_loader_core::service::Service::start(cfg.clone()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");

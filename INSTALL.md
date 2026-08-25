@@ -1,4 +1,4 @@
-# Installing Insight Prime
+# Installing Insight Map Loader
 
 Three things get built: the **app** that runs on each puck, the **host service**
 that aggregates them, and the **SteamVR driver** that presents them as trackers.
@@ -38,12 +38,12 @@ create `android/q1tracker/local.properties` with `sdk.dir=/path/to/Android/Sdk`.
 cargo build --release --manifest-path desktop/Cargo.toml
 ```
 
-Produces `desktop/target/release/insight-prime` (CLI) and `insight-prime-gui`.
+Produces `desktop/target/release/insight-map-loader` (CLI) and `insight-map-loader-gui`.
 
 Then create your site config:
 
 ```sh
-cp desktop/insight-prime.example.json insight-prime.json
+cp desktop/insight-map-loader.example.json insight-map-loader.json
 ```
 
 Edit `host` to **your PC's LAN IP** — the pucks stream to it, so `127.0.0.1`

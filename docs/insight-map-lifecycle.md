@@ -171,7 +171,7 @@ frame stays pinned by the common root node; the files do not stay identical.
 calibration. Proven between two Quest 1s; untested across models.
 
 **Back up the lineages.** They are a few MB and, before CREATE existed, were
-irreplaceable. `~/insight-prime-backups/`.
+irreplaceable. `~/insight-map-loader-backups/`.
 
 ---
 

@@ -19,7 +19,7 @@ __pycache__/
 
 # Site configuration: contains YOUR network. The examples are checked in;
 # the live files are not.
-insight-prime.json
+insight-map-loader.json
 bridge.json
 transforms.json
 tools/pucks.list

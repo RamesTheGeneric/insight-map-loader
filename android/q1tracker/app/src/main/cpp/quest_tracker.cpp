@@ -912,7 +912,7 @@ void cameraStop()
     if (g_camSender.joinable()) g_camSender.join();
 }
 #else
-// UVC (external mapping camera) is compiled out. Insight Prime reads the Quest's own
+// UVC (external mapping camera) is compiled out. Insight Map Loader reads the Quest's own
 // tracking cameras from a rooted native process instead, so this path is dead
 // weight here -- and it was never run against real hardware upstream. The
 // entry points remain as no-ops so the JNI symbol still resolves.

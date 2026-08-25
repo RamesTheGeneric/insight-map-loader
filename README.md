@@ -1,11 +1,12 @@
-# Insight Prime
+# Insight Map Loader
 
 **Full-body tracking from retired Quest 1 headsets, worn as body pucks.**
 
-`Insight′` — Lagrange's notation. The derivative of Meta's Insight: this project
-takes the SLAM system already inside every Quest 1 and makes several headsets
-share one tracking universe, then feeds their poses to SteamVR as generic
-trackers.
+The name is the mechanism: it **loads one Insight map onto several headsets**.
+That is the whole trick — a Quest 1 already contains a competent SLAM system,
+and headsets holding the same map track in the same coordinate frame. This
+project moves that map from one headset to the others and feeds their poses to
+SteamVR as generic trackers.
 
 No lighthouses, no marker boards, no calibration ritual. A Quest 1 is a
 four-camera inside-out tracker with an IMU that Meta no longer supports; there
@@ -22,7 +23,7 @@ root node *is* the frame.
 ```
   puck (Quest 1)                   host                        SteamVR
   ┌───────────────┐  MPT1/UDP  ┌──────────────────┐  MPT1  ┌────────────────┐
-  │ Insight SLAM  │───────────▶│ insight-prime    │───────▶│ driver_mapper  │
+  │ Insight SLAM  │───────────▶│ insight-map-loader    │───────▶│ driver_mapper  │
   │ q1tracker app │  pose 100Hz│ ingest + bridge  │udp/5181│ GenericTrackers│
   └───────────────┘            └──────────────────┘        └────────────────┘
          ▲                              │
@@ -55,8 +56,8 @@ truth, because two co-located pucks cannot lie to each other.
 | | |
 |---|---|
 | `android/q1tracker/` | the on-puck OpenXR app — streams pose as MPT1 over UDP |
-| `desktop/insight-prime-core/` | host service: ingest, bridge watchdog, fleet control, map jobs |
-| `desktop/insight-prime-gui/` | the control surface (egui) — fleet status, map sharing, roles |
+| `desktop/insight-map-loader-core/` | host service: ingest, bridge watchdog, fleet control, map jobs |
+| `desktop/insight-map-loader-gui/` | the control surface (egui) — fleet status, map sharing, roles |
 | `desktop/steamvr_driver/` | OpenVR driver exposing up to 11 generic trackers |
 | `tools/insightmap/` | decode, match, visualise and self-test Insight's SLAM map |
 | `tools/` | fleet bring-up and diagnostics over adb |
