@@ -1,0 +1,291 @@
+//! q2slam — bring up the pucks, bridge their frames, stream them as one.
+//!
+//!     q2slam status              what every puck is doing, one line each
+//!     q2slam up                  connect + configure + launch the trackers
+//!     q2slam bridge              measure each puck's LOCAL→world transform
+//!     q2slam run                 ingest → align → emit shared-frame MPT1
+//!     q2slam identify            blink every puck's LED in its slot colour
+//!     q2slam provision           one-time: make every puck stream after any boot
+//!
+//! Config is q2slam.json (see q2slam.example.json). The alignment transform
+//! comes from align_result.json, produced by tools/align_pool.py (cold start)
+//! and tools/align_map.py (refresh); `run` reloads it when the file changes,
+//! so a re-solve lands without restarting the service.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime};
+
+use q2slam_core::bridge::{self, PosePair};
+use q2slam_core::ingest::{Ingest, SlotState};
+use q2slam_core::mpt1::Device;
+use q2slam_core::config::Config;
+use q2slam_core::fleet;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let cmd = args.get(1).map(String::as_str).unwrap_or("help");
+    let cfg_path = args
+        .iter()
+        .position(|a| a == "--config")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "q2slam.json".into());
+
+    let cfg = match Config::load(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cannot read {cfg_path}: {e}");
+            eprintln!("copy desktop/q2slam.example.json to q2slam.json and edit it");
+            std::process::exit(2);
+        }
+    };
+
+    match cmd {
+        "status" => status(&cfg),
+        "up" => up(&cfg),
+        "bridge" => std::process::exit(bridge_cmd(&cfg)),
+        "run" => std::process::exit(run(&cfg)),
+        "identify" => identify(&cfg),
+        "provision" => provision(&cfg),
+        "mapdb" => mapdb_cmd(&cfg),
+        _ => {
+            eprintln!("usage: q2slam [status|up|bridge|run|identify|provision|mapdb] [--config q2slam.json]");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Report each puck's persisted Insight map: the file count, size, age and the
+/// FULL root uuid. Colocation is exactly "every puck reports the same root", so
+/// this is the one-glance check for it -- and it exercises the checked adb path
+/// that the map transplant is built on.
+fn mapdb_cmd(cfg: &Config) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    for p in &cfg.pucks {
+        print!("{:<16} ", p.ip);
+        let st = fleet::status(&p.ip);
+        if !st.reachable {
+            println!("unreachable");
+            continue;
+        }
+        match fleet::mapdb_info(&p.ip) {
+            Ok(info) if info.is_empty() => println!(
+                "mapdb EMPTY   context {} ({}) -- no persistent map to share",
+                if st.map_root.is_empty() { "none".into() } else { fleet::short_root(&st.map_root) },
+                if st.map_persistent { "persistent" } else { "transient" },
+            ),
+            Ok(info) => {
+                let age = if info.mtime_unix > 0 { now - info.mtime_unix } else { -1 };
+                println!(
+                    "{:>3} files {:>6} KB  written {}  root {} ({})",
+                    info.files,
+                    info.bytes / 1024,
+                    if age < 0 { "?".into() } else { format!("{age}s ago") },
+                    if st.map_root.is_empty() { "none".into() } else { st.map_root.clone() },
+                    if st.map_persistent { "persistent" } else { "transient" },
+                );
+            }
+            // The whole point of the checked path: a real reason, not "".
+            Err(e) => println!("ERROR {e}"),
+        }
+    }
+}
+
+fn provision(cfg: &Config) {
+    println!("granting boot-start to each puck (~45 s each for the appop to flush)\n");
+    let handles: Vec<_> = cfg
+        .pucks
+        .iter()
+        .map(|p| {
+            let ip = p.ip.clone();
+            std::thread::spawn(move || (ip.clone(), fleet::provision_autostart(&ip)))
+        })
+        .collect();
+    let mut all = true;
+    for h in handles {
+        match h.join() {
+            Ok((ip, Ok(true))) => println!("  {ip:15} ready — will stream after every boot"),
+            Ok((ip, Ok(false))) => {
+                println!("  {ip:15} FAILED — appop or guardian prop did not stick");
+                all = false;
+            }
+            Ok((ip, Err(e))) => {
+                println!("  {ip:15} error: {e}");
+                all = false;
+            }
+            Err(_) => all = false,
+        }
+    }
+    println!(
+        "\n{}",
+        if all {
+            "Done. Power-cycle a puck to confirm: it should appear in the stream unaided."
+        } else {
+            "Some pucks are not provisioned; they still need `q2slam up` after a boot."
+        }
+    );
+}
+
+fn identify(cfg: &Config) {
+    let handles: Vec<_> = cfg
+        .pucks
+        .iter()
+        .map(|p| {
+            let (r, g, b, name) = fleet::slot_led_rgb(p.device);
+            println!("{:15} dev{} blinking {}", p.ip, p.device, name);
+            let ip = p.ip.clone();
+            std::thread::spawn(move || fleet::blink(&ip, r, g, b, 6))
+        })
+        .collect();
+    for h in handles {
+        h.join().ok();
+    }
+    println!("LEDs restored");
+}
+
+fn status(cfg: &Config) {
+    for p in &cfg.pucks {
+        let s = fleet::status(&p.ip);
+        if !s.reachable {
+            println!("{:15} UNREACHABLE (adb connect {}:5555?)", p.ip, p.ip);
+            continue;
+        }
+        println!(
+            "{:15} dev{} {}{} batt {:3}%  tracker {}  guardian-off {}{}",
+            p.ip,
+            p.device,
+            s.tracking,
+            if s.tracking_valid { "" } else { " INVALID" },
+            s.battery_pct,
+            if s.tracker_running { "up" } else { "DOWN" },
+            s.guardian_disabled,
+            if s.vpn_trap { "  VPN-TRAP: packets are being eaten" } else { "" },
+        );
+    }
+}
+
+fn up(cfg: &Config) {
+    let port: u16 = cfg.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(5180);
+    for p in &cfg.pucks {
+        print!("{:15} ", p.ip);
+        if !fleet::connect(&p.ip).unwrap_or(false) {
+            println!("adb connect failed");
+            continue;
+        }
+        match fleet::configure_tracker(&p.ip, &cfg.host, port, p.device) {
+            Ok(()) => println!("tracker configured (device={}) and launched", p.device),
+            Err(e) => println!("configure failed: {e}"),
+        }
+    }
+    println!("give the XR sessions ~10 s, then `q2slam bridge`");
+}
+
+fn bridge_cmd(cfg: &Config) -> i32 {
+    let ingest = match Ingest::bind(&cfg.listen, Duration::from_millis(500)) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("cannot listen on {}: {e}", cfg.listen);
+            return 1;
+        }
+    };
+    println!("waiting for tracker streams on {}...", cfg.listen);
+    std::thread::sleep(Duration::from_secs(2));
+
+    let mut out = BTreeMap::new();
+    for p in &cfg.pucks {
+        let Some(device) = Device::from_u8(p.device) else { continue };
+        print!("{:15} pairing dumpsys with MPT1 (hold the puck STILL)... ", p.ip);
+        let mut pairs = Vec::new();
+        for _ in 0..10 {
+            let Some(world) = fleet::dumpsys_pose(&p.ip) else { continue };
+            let Some(s) = ingest.sample(device) else { continue };
+            // The dumpsys read takes ~300 ms; only pair it with an MPT1 sample
+            // that is current, so the two describe the same instant.
+            if !s.packet.valid || s.age() > Duration::from_millis(120) {
+                continue;
+            }
+            pairs.push(PosePair { world, local: s.packet.pose });
+        }
+        match bridge::solve(&pairs) {
+            Some(sol) => {
+                println!(
+                    "{} pairs, yaw {:+.2}°, spread {:.2}° / {:.0} mm{}",
+                    sol.pairs,
+                    sol.transform.yaw.to_degrees(),
+                    sol.yaw_spread_deg,
+                    sol.t_spread_m * 1000.0,
+                    if sol.yaw_spread_deg > 2.0 { "  UNSTABLE — was it moving?" } else { "" }
+                );
+                out.insert(
+                    p.ip.clone(),
+                    serde_json::json!({
+                        "yaw_deg": sol.transform.yaw.to_degrees(),
+                        "t": sol.transform.t,
+                        "yaw_spread_deg": sol.yaw_spread_deg,
+                        "t_spread_m": sol.t_spread_m,
+                        "unix_time": SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                    }),
+                );
+            }
+            None => {
+                println!("FAILED — {} usable pairs (tracker up? 6DOF?)", pairs.len());
+                return 1;
+            }
+        }
+    }
+    std::fs::write(&cfg.bridge, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+    println!("wrote {}", cfg.bridge);
+    0
+}
+
+fn run(cfg: &Config) -> i32 {
+    let service = match q2slam_core::service::Service::start(cfg.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    println!("service up → {} (bridging is automatic; watching for drift)", cfg.out);
+    let mut seen_events = 0usize;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let v = service.view();
+        // Events land as their own lines so they survive the status line.
+        if v.events.len() > seen_events || v.events.len() < seen_events {
+            for e in v.events.iter().skip(seen_events.min(v.events.len())) {
+                println!("\n[{e}]");
+            }
+            seen_events = v.events.len();
+        }
+        let mut line = format!("
+{:>7} pkts out", v.emitted);
+        for (d, p) in &v.live {
+            line += &format!("  {}:({:+.2},{:+.2},{:+.2})", d.label(), p[0], p[1], p[2]);
+        }
+        for (d, st, _, _) in &v.slots {
+            match st {
+                SlotState::NotTracking => line += &format!("  {}:NO-TRACK", d.label()),
+                SlotState::Stale => line += &format!("  {}:STALE", d.label()),
+                _ => {}
+            }
+        }
+        if let Some(s) = v.sep {
+            line += &format!("  sep {s:.3} m");
+        }
+        if v.drifted {
+            line += "  [DRIFTED]";
+        }
+        print!("{line}   ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+}
+
+fn mtime(path: &str) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}

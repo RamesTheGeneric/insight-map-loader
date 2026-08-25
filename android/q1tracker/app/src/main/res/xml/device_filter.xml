@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Matches a UVC (USB video class) camera by class, so any of the OV7251-class
+     modules trigger the attach launch + auto-grant without hard-coding VID/PID.
+     UVC devices present either as a Miscellaneous/IAD composite (0xEF/2/1) or
+     with the video class (14) at the device level; both are listed. -->
+<resources>
+    <usb-device class="239" subclass="2" protocol="1" />
+    <usb-device class="14" />
+</resources>

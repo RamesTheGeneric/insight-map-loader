@@ -1,0 +1,48 @@
+# Build outputs
+target/
+build/
+out/
+.gradle/
+.cxx/
+local.properties
+__pycache__/
+*.pyc
+.venv/
+*.o
+*.a
+
+# Signing material — NEVER commit these
+*.keystore
+*.jks
+*.apk
+*.apk.idsig
+
+# Site configuration: contains YOUR network. The examples are checked in;
+# the live files are not.
+q2slam.json
+bridge.json
+transforms.json
+tools/pucks.list
+*.bak
+
+# Insight map data. A persisted map is a 3-D scan of the room it was made in —
+# treat it as personal data, not as a build artifact.
+*.mapdata
+mapdb*/
+map/
+hipmap/
+calib/
+
+# Captures. Camera frames from a tracker are photographs of wherever it was.
+*.jpg
+*.jpeg
+*.png
+*.gray
+datasets/
+
+# Device binaries pulled from a headset are Meta's copyrighted code — they are
+# fetched at build time from YOUR device and must never be redistributed.
+*.so
+vndk*/
+
+*.log

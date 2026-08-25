@@ -1,0 +1,8 @@
+{
+    "driver_mapper": {
+        "enable": true,
+        "udp_port": 5181,
+        "stale_timeout_s": 0.5,
+        "pipeline_latency_s": 0.025
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "q2slam-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Manage Quest tracker pucks, align their tracking frames, aggregate their poses."
+
+# Kept lean on purpose -- this crate is what the SteamVR-facing side links
+# against. serde is here for the config/bridge/alignment JSON files only.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps JSON object key order on a round trip. Without it a
+# rewrite of q2slam.json re-serializes alphabetically and visibly scrambles a
+# hand-maintained file the first time the GUI changes a role.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[[example]]
+name = "listen"
+path = "examples/listen.rs"

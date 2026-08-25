@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <!-- Keep the radio and CPU up while tracking: the headset otherwise drops
+         WiFi in standby and never reassociates, silently stranding every pose. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- Network suggestions: lets the tracker ask to rejoin its own AP after the
+         dongle restarts. A tracker AP has no uplink, so Android never validates
+         it and prefers the house network otherwise. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- Start the tracker on boot without root. The rooted path
+         (tools/quest_boot_tracker.sh as a Magisk service) is better where it is
+         available; this is for headsets where it is not, such as the Quest 1
+         with its locked bootloader. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Not for drawing anything. Holding SYSTEM_ALERT_WINDOW is one of the few
+         documented exemptions from Android's background-activity-launch rules,
+         and BAL is what actually blocks a boot-time start: measured
+         "Background activity launch blocked ... callingUidProcState: RECEIVER
+         ... (BAL_BLOCK)" on a reboot where the receiver fired correctly. It is
+         not granted by installing; it needs a one-time
+             adb shell appops set com.mapperlocalizer.questtracker \
+                 SYSTEM_ALERT_WINDOW allow
+         which tools/quest_autostart_setup.sh does along with the other knobs. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Optional MPT1-over-Bluetooth transport (bt=1 in config.txt). The legacy
+         BLUETOOTH/BLUETOOTH_ADMIN pair covers API<=30; CONNECT is the API 31+
+         replacement and is what actually applies on this Android 14 headset. -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+                     android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+                     android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Declaring hand-tracking support is not about using hands: vrshell's
+         RequiresControllersLaunchInterceptor redirects any launch of a
+         controller-only app to a "turn on your controllers" dialog when the
+         controllers are asleep, which is exactly the state an unattended
+         tracker boots into. An app that can be driven without controllers is
+         not subject to that check. (settings put secure
+         skip_launch_check_requires_controllers_enabled true does NOT work —
+         measured: vrshell intercepts regardless.) -->
+    <uses-feature android:name="oculus.software.handtracking"
+                  android:required="false" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+
+    <!-- 6DoF headtracking is the entire point of this app. -->
+    <uses-feature android:name="android.hardware.vr.headtracking"
+                  android:version="1" android:required="true" />
+
+    <!-- Optional: a UVC camera bolted on for known-pose mapping. NOT required
+         (a headset with no camera is still a valid tracker), so the feature is
+         required="false" and the app installs and runs either way. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- Android refuses USB permission for UVC-class devices unless the app
+         holds CAMERA, even though we never touch Camera2. On this lens-less
+         headset grant it headlessly:
+         adb shell pm grant com.mapperlocalizer.questtracker android.permission.CAMERA -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- hasCode is now true: MainActivity (Java) is needed because the platform
+         only grants USB device access through the Java UsbManager; native libusb
+         cannot open the device without a fd from Java. -->
+    <application android:label="Mapper Quest Tracker"
+                 android:allowBackup="false"
+                 android:usesCleartextTraffic="true">
+        <!-- Only tokens the OLDEST target runtime knows. The Quest 1's frozen
+             v50 runtime parses this list during xrCreateInstance and hard-aborts
+             inside libvrapiimpl.so on an unrecognised token
+             ("Unknown device to support: quest3"), so "quest3" stays out.
+             "quest2" is safe: that device shipped years before v50, and without
+             it the app silently refuses to launch on a Quest 2 (am start reports
+             success, no process, no log). -->
+        <meta-data android:name="com.oculus.handtracking.frequency" android:value="LOW" />
+        <meta-data android:name="com.oculus.handtracking.version" android:value="V2.0" />
+
+        <meta-data android:name="com.oculus.supportedDevices"
+                   android:value="quest|quest2" />
+
+        <activity android:name=".MainActivity"
+                  android:exported="true"
+                  android:launchMode="singleTask"
+                  android:screenOrientation="landscape"
+                  android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
+                  android:excludeFromRecents="false">
+            <!-- MainActivity extends NativeActivity, so android_main still runs
+                 the OpenXR loop; this points at the same .so. -->
+            <meta-data android:name="android.app.lib_name" android:value="questtracker" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- Marks this as a VR app so the runtime hands it a session. -->
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+            <!-- Attaching the UVC camera re-launches the app AND auto-grants USB
+                 permission without a dialog, essential on a lens-less headset
+                 where no dialog can be seen. device_filter matches any UVC
+                 (video-class) device. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                       android:resource="@xml/device_filter" />
+        </activity>
+
+        <receiver android:name=".BootReceiver"
+                  android:exported="true"
+                  android:enabled="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

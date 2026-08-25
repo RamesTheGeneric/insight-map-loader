@@ -1,0 +1,11 @@
+[package]
+name = "q2slam-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Desktop control surface for the Quest tracker pucks."
+
+[dependencies]
+q2slam-core = { path = "../q2slam-core" }
+eframe = "0.36"
+serde_json = "1"
