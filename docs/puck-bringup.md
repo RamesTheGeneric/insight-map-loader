@@ -51,7 +51,8 @@ adb -s <IP>:5555 shell id -u        # must print 0
 
 **Root does not survive a reboot.** Re-run this after every one, or
 `setprop`/`chown`/`chcon` fail *silently* and everything downstream looks
-broken for the wrong reason. `tools/q1connect.sh` does the retry loop.
+broken for the wrong reason. `tools/q1bringup.sh <ip>` does the retry loop, and
+everything below it.
 
 ## 3. Install the tracker app
 

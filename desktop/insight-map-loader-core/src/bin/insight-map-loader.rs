@@ -3,14 +3,16 @@
 //!     insight-map-loader status              what every puck is doing, one line each
 //!     insight-map-loader up                  connect + configure + launch the trackers
 //!     insight-map-loader bridge              measure each puck's LOCAL→world transform
-//!     insight-map-loader run                 ingest → align → emit shared-frame MPT1
+//!     insight-map-loader run                 ingest → bridge → emit shared-frame MPT1
 //!     insight-map-loader identify            blink every puck's LED in its slot colour
 //!     insight-map-loader provision           one-time: make every puck stream after any boot
 //!
-//! Config is insight-map-loader.json (see insight-map-loader.example.json). The alignment transform
-//! comes from align_result.json, produced by tools/align_pool.py (cold start)
-//! and tools/align_map.py (refresh); `run` reloads it when the file changes,
-//! so a re-solve lands without restarting the service.
+//! Config is insight-map-loader.json (see insight-map-loader.example.json).
+//!
+//! There is no inter-puck alignment step: the pucks share one Insight map, so
+//! their world frames are already the same frame. The only stored calibration
+//! is each puck's LOCAL→world bridge in bridge.json, which `run` solves and
+//! re-verifies on its own — `bridge` is the manual override.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};

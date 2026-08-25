@@ -60,7 +60,8 @@ truth, because two co-located pucks cannot lie to each other.
 | `desktop/insight-map-loader-gui/` | the control surface (egui) — fleet status, map sharing, roles |
 | `desktop/steamvr_driver/` | OpenVR driver exposing up to 11 generic trackers |
 | `tools/insightmap/` | decode, match, visualise and self-test Insight's SLAM map |
-| `tools/` | fleet bring-up and diagnostics over adb |
+| `tools/q1bringup.sh` | take one rooted headset from bare to streaming, or repair it |
+| `tools/q1sep.py` | the ground-truth check — hold two pucks together, measure the disagreement |
 | `docs/` | how it works and how it was found out — see `docs/README.md` |
 
 Start with **[INSTALL.md](INSTALL.md)**, then **[docs/puck-bringup.md](docs/puck-bringup.md)**

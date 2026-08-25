@@ -1,11 +1,14 @@
 //! Configuration and the on-disk transform files.
 //!
-//! Three JSON files, one owner each:
-//! * `insight-map-loader.json` — the site config: puck IPs, slots, addresses. Human-edited.
-//! * `align_result.json` — the inter-puck alignment, written by the solvers
-//!   (tools/align_pool.py, tools/align_map.py). Reloaded on change.
+//! Two JSON files, one owner each:
+//! * `insight-map-loader.json` — the site config: puck IPs, roles, addresses.
+//!   Human-edited, but the GUI also writes `device` when a role is assigned.
 //! * `bridge.json` — each puck's XR-LOCAL→Insight-world transform for the
 //!   current tracker session, written by `insight-map-loader bridge` (or the GUI).
+//!
+//! There is deliberately no inter-puck alignment file. The pucks share one
+//! Insight map, so the transform between their world frames is the identity;
+//! the bridge is the only stored calibration left.
 
 use std::collections::BTreeMap;
 
@@ -72,7 +75,7 @@ impl Config {
 /// `Config`: the struct does not model every key a human may have put there,
 /// and a round trip through it would drop them. Written atomically
 /// (tmp + fsync + rename) so a watcher never sees a partial file, matching the
-/// pattern service.rs uses for transforms.json.
+/// pattern used for bridge.json.
 pub fn set_puck_device(path: &str, ip: &str, device: u8) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let mut root: serde_json::Value =

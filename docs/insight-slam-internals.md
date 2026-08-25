@@ -1,10 +1,20 @@
 # How Insight uses its map (and how we can interact with it)
 
 Investigation into the runtime SLAM pipeline — the goal being to align two
-headsets' *actual tracking frames* more accurately than q1mapd's 4-DoF overlay.
-Everything here is observed live from `dumpsys tracking` on `monterey`
-(Quest 1), which exposes the tracking service's internal state read-only and
-unrestricted. Insight = **VIPER / VegaMapper**, `libtrackingengines.so`.
+headsets' *actual tracking frames* more accurately than the host-side ORB
+overlay we ran at the time. Everything here is observed live from
+`dumpsys tracking` on `monterey` (Quest 1), which exposes the tracking service's
+internal state read-only and unrestricted. Insight = **VIPER / VegaMapper**,
+`libtrackingengines.so`.
+
+> **Read this knowing how it ended.** Option 3 in "Implications" below — native
+> colocation, both pucks relocalizing into one shared map so Insight aligns
+> their frames itself — is what shipped, and it made the overlay redundant
+> rather than more accurate. The wall reported here at "anchor creation (VR
+> focus) and map load (cloud)" was climbed from a different side: the map is a
+> file, and a file can be copied. See `docs/insight-map-lifecycle.md`. What
+> follows is kept because the reasoning about frames, descriptors and DoF is
+> what made that recognisable when it appeared.
 
 ## The map structure (VegaMapper, Structure-of-Arrays)
 
@@ -25,8 +35,8 @@ EnergyEdges .. ImagePatch .. Descriptors(BA/VIO) .. Anchors .. Submaps
   end-to-end feature extractor — plus `DPEImageBackbone`, `SeacliffFT`, etc.
   This matches the config flags `enable_descriptor_vega`,
   `enable_binary_deep_descriptor`, `use_gravity_aligned_deep_descriptors`.
-  **This is why Insight relocalizes across lighting where our ORB q1mapd
-  fails** — the literature's SuperPoint-vs-ORB result, in Meta's own stack.
+  **This is why Insight relocalizes across lighting where a plain ORB
+  pipeline fails** — the literature's SuperPoint-vs-ORB result, in Meta's own stack.
 
 ## The tracking-frame chain (map → output pose)
 
@@ -53,7 +63,7 @@ separate origin anchors. `submapTransforms` (re)stitch submaps on loop
 closure / relocalization.
 
 Useful corollary: `T_SmoothWorld_Odometry` is a pure **yaw** (so3 y-only) — the
-frames really are gravity-aligned Y-up, so q1mapd's **4-DoF model is correct**;
+frames really are gravity-aligned Y-up, so a **4-DoF model is correct**;
 its accuracy ceiling is matching/geometry quality, not the DoF count.
 
 ## How relocalization uses the map
@@ -84,7 +94,7 @@ the frame transforms. Verbose dump args are rejected (`unhandled cmd`).
 
 What we now know that bears on the goal:
 
-1. **q1mapd's 4-DoF is the right model** (frames are gravity-aligned). The
+1. **4-DoF is the right model** (frames are gravity-aligned). The
    accuracy ceiling is feature matching + correspondence geometry, not DoF.
 2. **Insight's edge is deep descriptors + global BA.** Two realistic ways to
    borrow it:
@@ -100,7 +110,7 @@ What we now know that bears on the goal:
 4. **An observable-only angle:** `dumpsys` gives each device's full frame chain
    and any anchor's `T_localOrigin_anchor` live. If two devices could be made
    to place a transient anchor at the *same physical point* (via cross-device
-   feature correspondence, as q1mapd already finds), then
+   feature correspondence, which the overlay already found), then
    `T_A_B = T_localOriginA_anchor ∘ inv(T_localOriginB_anchor)` is a full 6-DoF
    alignment from Insight's own optimized estimates — no persistence, no map
    load, no cloud. The open question is whether a transient placed anchor's
@@ -133,13 +143,13 @@ Correcting the earlier "anchor route is walled" conclusion. Live evidence:
 **The un-walled 6-DoF alignment path this opens:**
 
 1. Both headsets place a transient anchor at the *same physical point* —
-   correspondence found the way q1mapd already does it (cross-device camera
-   feature match). No persist, no export, no cloud.
+   correspondence found the way the ORB overlay already did it (cross-device
+   camera feature match). No persist, no export, no cloud.
 2. Read each anchor's `T_localOrigin_anchor` from `dumpsys tracking` (read-only,
    unrestricted).
 3. `T_A_B = T_localOriginA_anchor ∘ inv(T_localOriginB_anchor)` — a full 6-DoF
    alignment computed from Insight's own bundle-adjusted estimates, strictly
-   better than our 4-DoF ORB overlay.
+   better than the 4-DoF ORB overlay.
 
 Open problem: `placeAnchor` succeeds only where coverage is rich (it failed on
 the desk with a 22-keyrig map). The reliability, and getting BOTH devices to
@@ -178,25 +188,33 @@ alignment mechanism directly:
    into the shared submap** using deep descriptors, which pins its tracking
    frame to the headset's frame, continuously and drift-corrected.
 
-This is exactly the colocation architecture q1mapd reaches for, and it
-**validates the approach** — sharing a map and relocalizing into it *is* how
-Meta does multi-device alignment. It also names the refinements q1mapd is
-missing:
+**This was the decisive observation.** Sharing a map and relocalizing into it
+*is* how Meta aligns multiple independently-SLAMing devices — so what this
+project ended up doing is not a workaround for a walled API, it is the same
+architecture, and Insight's deep descriptors and bundle adjustment come along
+with it. That is why the ORB overlay was deleted rather than improved.
 
-| | q1mapd today | Meta's controller alignment |
+Where this project now sits against it:
+
+| | this project | Meta's controller alignment |
 |---|---|---|
-| map unit | one big map (~34k landmarks) | **compact submap (~150 pts, 73 KB)** |
-| cadence | shared once at founding | **re-shared every ~3 s** (drift-corrected) |
-| features | ORB (illumination-fragile) | **deep descriptors** (robust) |
-| frame result | 4-DoF overlay | native 6-DoF relocalization |
+| map unit | one whole map, copied as files | **compact submap (~150 pts, 73 KB)** |
+| cadence | shared once, at founding | **re-shared every ~3 s** (drift-corrected) |
+| features | Insight's deep descriptors | the same |
+| frame result | native 6-DoF relocalization | the same |
 
-**The q1mapd refinement this points to:** continuous exchange of compact
-submaps between pucks + relocalize-into-latest, instead of a single big founding
-map. One puck (e.g. hip) plays the "headset" role and publishes submaps; the
-others relocalize into the freshest one. That is drift-corrected shared-frame
-alignment by construction — no re-found, no staleness, and it degrades
-gracefully as pucks move apart. We can implement the *pattern* in our own map
-format; we do not need Meta's transport.
+Two of the four rows now match; the gap left is **cadence and granularity**, not
+accuracy. A one-shot share means the pucks agree at founding and then each holds
+its own frame independently — which is exactly why the drift monitor and the
+bridge watchdog exist.
+
+**The refinement this points to:** continuous exchange of compact submaps
+between pucks plus relocalize-into-latest, instead of a single founding map. One
+puck (the hip, say) plays the "headset" role and publishes submaps; the others
+relocalize into the freshest one. That is drift-corrected shared-frame alignment
+by construction — no re-found, no staleness, and it degrades gracefully as pucks
+move apart. The *pattern* is implementable on the map format decoded here, with
+no need for Meta's transport. It is unbuilt.
 
 Also confirmed here: the same VegaMapper/`SubmapExport` machinery as Quest 1,
 plus a `SlamAnchorServer` shared across `mrsystemservice` / `guardian` /

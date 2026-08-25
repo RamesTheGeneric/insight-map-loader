@@ -1,7 +1,12 @@
 # Quest 1 -- calibration and IMU
 
-What a SLAM frontend needs besides the images, and where it lives. Companion to
-[quest1-hal.md](quest1-hal.md), which covers the camera path.
+Device-level facts about the Quest 1's sensor stack: where the factory
+calibration lives, how the IMU stream behaves, how to put camera and IMU on one
+clock, and Insight's pose shared memory — the fast path to a pose and the gate
+that keeps it shut, which is why the tracker app goes through OpenXR instead.
+
+The camera path itself is not covered here; nothing in this repo reads the
+cameras directly.
 
 ## Calibration
 
@@ -164,7 +169,7 @@ repeating the exercise:
   currently tagging every frame.
 
 So a valid measurement needs a reference camera verified to be tagging
-consecutively (check with `q1diag ring` first), samples taken only when its
+consecutively (check the camera ring's counters first), samples taken only when its
 counter actually changes, and a fit against the *lower envelope* of the
 residual rather than the mean, since latch latency is one-sided -- never early,
 sometimes late.

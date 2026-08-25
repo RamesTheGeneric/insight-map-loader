@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Launch the insight-map-loader GUI. Always runs from the repo root, because every path the
-# service uses is relative to it (insight-map-loader.json, map/, transforms.json, calib/,
+# Launch the insight-map-loader GUI. Always runs from the repo root, because every
+# path the service uses is relative to it (insight-map-loader.json, bridge.json,
 # and the tools/ scripts it shells out to).
 set -e
 cd "$(dirname "$(readlink -f "$0")")"

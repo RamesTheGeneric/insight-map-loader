@@ -2,18 +2,19 @@
   "host": "192.168.1.2",
   "listen": "0.0.0.0:5180",
   "out": "127.0.0.1:5181",
-  "align": "align_result.json",
   "bridge": "bridge.json",
   "pucks": [
     {
       "ip": "192.168.1.10",
-      "device": 0,
-      "reference": true
+      "device": 0
     },
     {
       "ip": "192.168.1.11",
       "device": 1
+    },
+    {
+      "ip": "192.168.1.12",
+      "device": 2
     }
-  ],
-  "auto_realign": false
+  ]
 }

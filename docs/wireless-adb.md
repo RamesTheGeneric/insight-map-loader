@@ -4,8 +4,9 @@ The Quest 1 (`monterey`) is **Android 10 / API 29**, so this is the classic
 `adb tcpip` route -- *not* the Android 11+ `adb pair` / mDNS flow. There is no
 pairing code and no Developer-options "Wireless debugging" toggle to find.
 
-Verified working end to end: the HAL camera path, the frame rings and the MJPEG
-server all run over wifi with no measurable penalty versus USB (numbers below).
+Verified working end to end: every puck in this project is reached only over
+wifi, with no measurable penalty versus USB (numbers below). That matters here
+more than usual — a puck strapped to an ankle cannot have a cable in it.
 
 ## The devices
 
@@ -63,9 +64,9 @@ uid=2000(shell) ... context=u:r:shell:s0
 Enforcing
 ```
 
-`adb root` and any `setenforce` are **not** persistent. Symptom is
-`cp: /data/nativetest64/vendor/ovrcam/q1serve: Permission denied` out of
-`deploy_q1.sh`. Fix:
+`adb root` and any `setenforce` are **not** persistent. The symptom is a
+`Permission denied` out of the first thing that tries to write outside
+`/data/local/tmp`. Fix:
 
 ```bash
 adb root          # restarts adbd as root
@@ -80,38 +81,32 @@ to go back to USB for it.
 Two further things learned here:
 
 - **SELinux permissive is not required.** With `adb root` the shell lands in
-  `u:r:su:s0`, and the whole camera pipeline runs with SELinux still
+  `u:r:su:s0`, and everything this project does runs with SELinux still
   **Enforcing**. Earlier sessions had run `setenforce 0`; it turns out to be
-  unnecessary, so leave enforcing on.
-- The **proximity override is also cleared** by a reboot. Re-apply it, or just
-  use `deploy_q1.sh`, which does it for you:
+  unnecessary, so leave enforcing on. (Files pushed into `/vision` still need
+  `chcon u:object_r:vision_file:s0` — that is a label, not a mode.)
+- The **proximity override is also cleared** by a reboot. Re-apply it, or let
+  `tools/q1bringup.sh` do it:
   ```bash
   adb shell "am broadcast -a com.oculus.vrpowermanager.prox_close"
   adb shell "setprop debug.oculus.forceHeadsetOn 1"
   ```
 
-## Using it with the existing scripts
+## Using it with scripts that call bare `adb`
 
-`deploy_q1.sh`, `deploy_run.sh` and friends all call bare `adb`. With USB *and*
-wifi both attached that fails with `adb: more than one device/emulator`. No
-script changes are needed -- adb honours `ANDROID_SERIAL`:
+With USB *and* wifi both attached, any script calling bare `adb` fails with
+`adb: more than one device/emulator`. No script changes are needed -- adb
+honours `ANDROID_SERIAL`:
 
 ```bash
 export ANDROID_SERIAL=192.168.1.10:5555
-./deploy_q1.sh ring
-./deploy_q1.sh serve
 ```
 
-`deploy_q1.sh serve` sets up `adb forward tcp:8080`, which works over wifi too,
-so `http://localhost:8080/` keeps working. But over wifi you can also skip the
-forward entirely and hit the device directly:
-
-```
-http://192.168.1.10:8080/
-```
-
-Handy when the headset is being worn or is on a stand across the room, which is
-the whole point for the tracker-puck work.
+The tools in this repo take the puck's IP explicitly instead (`tools/q1bringup.sh
+<ip>`, `Device("192.168.1.10")`), so they are unaffected either way. Over wifi
+you can also reach a service on the puck directly rather than through
+`adb forward` -- handy when the headset is being worn or is on a stand across
+the room, which is the whole point for the tracker-puck work.
 
 ## Performance: wifi vs USB
 
@@ -125,37 +120,13 @@ Bulk transfer, 32 MB `dd` through `adb shell`:
 | USB | 33.8 MB/s |
 | wifi (5 GHz) | 30.5 MB/s |
 
-MJPEG server, 4-camera 1280x960 mosaic, q=75, direct to the device IP with no
-adb forward:
+That is the number that decides whether pulling a map is practical: a mapdb is
+single-digit megabytes, so a pull or a seed is a couple of seconds either way.
 
-| mode | served fps | capture fps | jpeg | skipped | torn |
-|---|---|---|---|---|---|
-| default (long exposure only) | 29.6 | 29.99 | 155 KB | 414* | 0 |
-| `--exposure any` | **57.2** | 56.92 | 167 KB | **0** | 0 |
-
-\* those skips are from the client attach/detach at the edges of the sample,
-not steady state.
-
-57.2 fps x 167 KB = **9.6 MB/s (~76 Mbps)** sustained with **zero skipped and
-zero torn frames**. Wireless keeps up with the sensors completely.
-
-### One gotcha that looks like a wifi problem and is not
-
-A first measurement showed **2.5 fps**, which looks damning for wifi. It was
-not. `/stats` told the real story:
-
-```json
-{"fps":5.76,"capture_fps":30.02,"encode_ms":16.25,"skipped":1939,"clients":2}
-```
-
-Capture was at full rate and encode was fine; the served rate had collapsed.
-The cause was a **stale client**: a `curl` that had hit its `--max-time` was
-still counted in `clients`, and the server was stalling on the dead socket.
-Killing and restarting `q1serve` restored 29.6 fps immediately.
-
-So: when the stream looks slow, read `/stats` before blaming the network.
-`capture_fps` vs `fps` separates "the sensors/HAL are struggling" from "the
-delivery path is struggling", and `clients` will show a leaked connection.
+The pose stream itself is nowhere near this — MPT1 is 68 bytes per packet at
+~72 Hz per puck, about 40 kbit/s each. Wifi capacity has never been the
+constraint; the AP's *latency* under load is the thing to watch, since every
+packet is a pose that ages.
 
 ## Quick reference
 
@@ -169,7 +140,6 @@ adb root && sleep 3 && adb connect 192.168.1.10:5555
 
 # sanity
 adb shell id            # want uid=0(root), context u:r:su:s0
-curl -s http://192.168.1.10:8080/stats
 
 # drop the wireless transport
 adb disconnect 192.168.1.10:5555
@@ -257,17 +227,16 @@ is the whole cost. Making adbd come up *already* rooted would mean setting
 verity-enforced partition -- i.e. disabling verity and remounting. Not worth
 it: `adb root` over wifi restarts adbd and it comes straight back on 5555.
 
-So instead of fighting for root-at-boot, use the helper:
+So instead of fighting for root-at-boot, let the host do it:
 
 ```bash
-eval "$(./tools/q1connect.sh)"          # default IP
-eval "$(./tools/q1connect.sh 192.168.1.13)"
-eval "$(./tools/q1connect.sh --usb)"    # discover IP from a USB-attached puck
+./tools/q1bringup.sh 192.168.1.10
 ```
 
 It connects, re-roots if adbd came back as shell, reapplies the proximity
-override, and prints the `export ANDROID_SERIAL=...` line to eval. That is the
-whole post-reboot recovery for a puck.
+override, and carries on through the rest of the per-boot setup. That is the
+whole post-reboot recovery for a puck, and the GUI runs the same steps for the
+pucks it knows about.
 
 ## Wifi: yes, fully, but not through `cmd wifi`
 
@@ -336,57 +305,14 @@ pucks are worn anywhere that is not a controlled network.
 
 ---
 
-# Fleet control from the host: `tools/q1fleet.sh`
+# Bringing a new puck online
 
-Since root-at-boot is deliberately host-driven (above), the whole fleet is
-managed from one host-side script. Nothing runs on the headsets except the
-camera server. `q1fleet.sh` wraps the per-boot `adb root` + prox dance for
-every puck and gives one place to start, watch and query them.
+Since root-at-boot is deliberately host-driven (above), a puck that is
+power-cycled comes back as plain shell and the host has to re-root it. The GUI
+does that for the pucks it knows about; `tools/q1bringup.sh <ip>` does it for
+one puck from the command line, along with the rest of the per-boot setup.
 
-The puck list comes from, in order: the `$Q1_PUCKS` env var (space/comma
-separated), `tools/pucks.list` (one IP per line, gitignored because it is
-site-specific, like the calibration), or the single default IP baked into the
-script.
-
-```bash
-# who is up, and are they streaming?
-./tools/q1fleet.sh status
-# PUCK                 STATE  SERIAL          Q1SERVE  FPS
-# 192.168.1.10:5555   root   <SERIAL>  3772     62.75
-# 192.168.1.13:5555   down   -               -        -
-
-./tools/q1fleet.sh up                          # connect + root + prox, all pucks
-./tools/q1fleet.sh serve --exposure any --q 75 # deploy + start q1serve on each
-./tools/q1fleet.sh stop                        # stop the servers
-./tools/q1fleet.sh run "getprop ro.serialno"   # run a command on every puck
-```
-
-`serve` starts `q1serve` **detached** on each puck (`setsid`, fds redirected to
-`/data/local/tmp/q1serve.log`), so the host `adb shell` returns immediately and
-each puck keeps streaming on its own IP at `:8080`. `status` reads each puck's
-`/stats` directly over the LAN, so `FPS` is live (it reads 0 with no client
-attached -- the encoder only runs on demand -- and jumps to ~60 once something
-is pulling the stream).
-
-For an unattended rig, `watch` is the closest thing to "autonomous pucks"
-without touching the device: it re-checks every puck on an interval, re-roots
-any that rebooted back to shell, and with `--serve` restarts `q1serve` on any
-puck found not running.
-
-```bash
-./tools/q1fleet.sh watch --serve 20    # keep the fleet rooted + streaming, every 20s
-```
-
-Run that on the same host that consumes the tracking data and a puck that is
-power-cycled comes back to a streaming state a few seconds later with no manual
-step -- the host notices it, re-roots it, and restarts the server. That is the
-practical substitute for an on-device boot service, and it needs no changes to
-the read-only system partition.
-
-## Bringing a new puck online
-
-Done for real with puck 2 (`<SERIAL>`); the wifi step had a wrinkle worth
-recording.
+The wifi step had a wrinkle worth recording, found for real on puck 2.
 
 1. Once over USB, enable the persistent wireless port:
    ```bash
@@ -396,10 +322,10 @@ recording.
    assumed already set, so `adb root` works on every boot.)
 2. **Get it onto wifi** -- see below if it has never joined.
 3. Give it a static DHCP lease on the router so its IP is stable.
-4. Add the IP to `tools/pucks.list`.
-5. `./tools/q1fleet.sh up` should show it as `root`.
+4. Add the puck to `insight-map-loader.json` and assign it a role.
+5. `./tools/q1bringup.sh <ip>` should take it all the way to 6DoF.
 
-### A puck that has never joined the network
+## A puck that has never joined the network
 
 Puck 2 arrived with `wpa_state=DISCONNECTED`, an empty `list_networks`, and no
 IP -- wifi enabled but never configured. Two things were learned.
@@ -435,8 +361,8 @@ context. It survived the shutdown untouched -- `system_server` did not rewrite
 it on the way down -- and the puck came up joined with a DHCP lease.
 
 > **Do not copy the file verbatim.** It contains a per-network
-> `RandomizedMacAddress`. Puck 1's is `36:86:55:bc:c0:88` while it actually
-> uses its factory MAC, so randomization is configured but inactive on this
+> `RandomizedMacAddress`, but the puck actually associates using its factory
+> MAC -- so randomization is configured but inactive on this
 > build. Copy it and two pucks carry the same MAC -- a horrible thing to
 > debug, and it breaks MAC-keyed static DHCP leases if the feature ever turns
 > on. Give each puck a unique locally-administered MAC (deriving it from the
@@ -444,103 +370,3 @@ it on the way down -- and the puck came up joined with a DHCP lease.
 > the factory MAC is used. Also reset `NumAssociation` to `0`.
 
 Only those three fields should differ from the donor file.
-
-## GUI: `tools/q1gui.py`
-
-A local web dashboard over the same logic, for when a terminal table is not
-enough. The pucks already serve MJPEG over HTTP, so the browser can embed each
-puck's live 4-camera mosaic directly next to its controls -- no extra plumbing,
-and no native GUI toolkit fighting to render four video streams.
-
-```bash
-./tools/q1fleet.sh gui              # or: python3 tools/q1gui.py
-# q1 fleet GUI -> http://127.0.0.1:8090/
-```
-
-Stdlib only -- no pip install. `--port N` to move it, `--host 0.0.0.0` to reach
-it from another machine (read the security note above first; that exposes puck
-control to the LAN).
-
-One card per puck, refreshed every 3 s:
-
-- status dot (green root / amber shell / red down), serial, `ip:port`, pid
-- the **live mosaic** embedded straight from `http://<puck>:8080/stream`
-- the full `/stats` row -- served fps, capture fps, encode ms, KB/frame,
-  skipped, torn, clients, exposure
-- per-puck **Root / Serve / Stop / Reboot**, an "Open" link to the raw stream,
-  and a shell box that runs a command on that puck and shows the output
-- header controls to Serve/Stop/Root the **whole fleet** at once, with the
-  `q1serve` flags in an editable field
-
-### A bug worth recording
-
-The obvious implementation -- re-render `grid.innerHTML` on every poll --
-is wrong here, and quietly so. Replacing the HTML destroys and recreates every
-`<img>`, which **restarts each MJPEG stream every 3 seconds** and leaks a
-client connection on the puck each time. That is precisely the stale-client
-condition that collapsed the served rate to 2.5 fps earlier in this document.
-
-So the dashboard rebuilds a card only when its *structure* changes (reachable /
-root-vs-shell / serving / pid / serial) and otherwise patches the stat numbers
-in place. Verified with a DOM stub driving the real render function:
-
-```
-steady-state polls -> same <img> element: true
-steady-state polls -> same card element : true
-fps cell patched in place               : true
-serve->stop rebuilds the card           : true
-```
-
-and against the live puck, `clients` held flat across repeated polls.
-
-### API
-
-The backend is a plain JSON API, so it is scriptable too:
-
-```bash
-curl -s localhost:8090/api/pucks | python3 -m json.tool
-curl -s -X POST localhost:8090/api/action -H 'Content-Type: application/json' \
-     -d '{"op":"serve","flags":"--exposure any --q 75"}'
-```
-
-`op` is one of `up`, `serve`, `stop`, `deploy`, `reboot`, `run` (with `cmd`).
-Omit `targets` to hit the whole fleet, or pass a list of `ip:port`. Unknown ops,
-empty `run` commands and malformed JSON are rejected with 400.
-
-## Two pucks at once
-
-First real fleet test, both streaming `--exposure any --q 75` concurrently to
-separate clients over the same AP:
-
-| puck | served fps | capture fps | jpeg | skipped | torn |
-|---|---|---|---|---|---|
-| 1 `.108` | 49.6 | 59.1 | 193 KB | 0 | 0 |
-| 2 `.132` | 59.9 | 60.1 | 35 KB | 0 | 0 |
-
-**Zero skipped and zero torn on both**, roughly 94 Mbps combined. Wifi is not
-the constraint for two pucks, and there is headroom for the third.
-
-The large difference in `jpeg_bytes` is not a fault: puck 2 was sitting in a
-dark spot. Snapshots from both confirmed all four cameras working on each --
-a near-black scene simply compresses to 35 KB where a lit room takes 193 KB.
-When a puck's frames look suspiciously small, pull `/snapshot` and look before
-assuming the capture path is broken.
-
-### `Text file busy` on re-deploy
-
-Re-serving over an already-running server failed on both pucks:
-
-```
-192.168.1.10:5555  deploy FAILED
-192.168.1.11:5555  deploy FAILED
-```
-
-`deploy_one` copied the new binary into place *before* anything stopped the
-old one, and Linux will not let a running executable be overwritten:
-
-```
-cp: /data/nativetest64/vendor/ovrcam/q1serve: Text file busy
-```
-
-It only ever worked before because nothing was running yet. Both `q1fleet.sh`
-and the GUI backend now `pkill` the binaries before the copy.

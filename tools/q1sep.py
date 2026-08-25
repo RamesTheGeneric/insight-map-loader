@@ -1,40 +1,44 @@
 #!/usr/bin/env python3
-"""Ground-truth alignment check: put two pucks together, measure the disagreement.
+"""Ground-truth colocation check: put two pucks together, measure the disagreement.
 
-Physically stack or touch the pucks, then run this. Their reported map-frame
-positions should then differ only by the physical offset between the two
-headsets' Insight origins (~0.1-0.2 m). Anything substantially larger is
-alignment error, and this prints it as a single number.
+Physically stack or touch two pucks, then run this. If they share a map they
+share a coordinate frame, so their reported positions should differ only by the
+physical offset between the two headsets' Insight origins.
 
 Why this is worth having: it is the only measurement in the system with real
-ground truth. Every other quality signal -- solver residual, inlier count, the
-on-puck verifier's median -- scores a transform against the MAP, so a map that
-is itself distorted scores well while the pucks disagree with each other. Two
-co-located pucks cannot lie to you.
+ground truth. Every other signal -- matching residual, inlier count, "same root
+uuid" -- scores the map against itself, so a map that is internally consistent
+but wrong still scores well. Two co-located pucks cannot lie to each other.
 
-It also localises the fault. The math here reads each puck's Insight WORLD pose
-from dumpsys and applies only T_map_world, bypassing the bridge and the MPT1
-stream entirely (same convention as Frame4Dof::apply_point). So:
+**No transform is applied.** That is the point: with a shared map the transform
+IS identity, and applying anything would measure the correction rather than the
+colocation. The reading therefore also tests the premise -- if these numbers are
+large, the pucks are not really sharing a frame.
 
-    disagreement here      -> the fault is in T_map_world (localization)
-    agreement here but not
-    in the GUI             -> the fault is downstream: bridge or MPT1
+    ./tools/q1sep.py                          # pucks from insight-map-loader.json
+    ./tools/q1sep.py 192.168.1.10 192.168.1.11
+    ./tools/q1sep.py --samples 20
 
-    ./tools/q1sep.py                      # all pucks in transforms.json
-    ./tools/q1sep.py --transforms X.json
+Interpreting it: expect a few centimetres horizontally. A steady vertical offset
+is normal and is mount geometry, not error -- two headsets held together have
+their origins a headset-thickness apart. Drift would not hold still.
 """
 import argparse
-import itertools
 import json
 import math
+import os
 import re
+import statistics
 import subprocess
+import sys
+import time
 
 
 def dumpsys_pose(ip):
-    """Insight world position, or None if the puck is not tracking at 6DoF."""
-    # Never pipe dumpsys into something that closes the pipe early -- it can
-    # leave the tracking service unavailable for seconds. Dump, then grep.
+    """Insight WORLD position, or None if the puck is not tracking at 6DoF."""
+    # Never pipe `dumpsys tracking` into something that closes the pipe early
+    # (grep -m1, head): that leaves the tracking service unavailable for
+    # seconds. Dump to a file on-device, then grep the file.
     subprocess.run(["adb", "-s", f"{ip}:5555", "shell",
                     "dumpsys tracking > /data/local/tmp/qsep.txt 2>/dev/null"],
                    capture_output=True, timeout=30)
@@ -47,71 +51,71 @@ def dumpsys_pose(ip):
     return [float(x) for x in m.group(1).split(",")] if m else None
 
 
-def apply_4dof(p, yaw_deg, t):
-    """Frame4Dof::apply_point -- yaw about the gravity-aligned Y, then translate."""
-    y = math.radians(yaw_deg)
-    c, s = math.cos(y), math.sin(y)
-    return [c * p[0] + s * p[2] + t[0], p[1] + t[1], -s * p[0] + c * p[2] + t[2]]
+def map_root(ip):
+    """The puck's map context: (short root uuid, persistent?)."""
+    o = subprocess.run(["adb", "-s", f"{ip}:5555", "shell",
+                        "grep -m1 'Vega Map Context' /data/local/tmp/qsep.txt"],
+                       capture_output=True, timeout=30).stdout.decode()
+    m = re.search(r"topNodeUid ([0-9a-f-]+)", o)
+    return (m.group(1)[:8] if m else ""), "(persistent)" in o
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--transforms", default="transforms.json")
-    ap.add_argument("--expect", type=float, default=0.2,
-                    help="physical offset between the two Insight origins (m)")
+    ap.add_argument("pucks", nargs="*", help="IPs (default: read the config)")
+    ap.add_argument("--config", default="insight-map-loader.json")
+    ap.add_argument("--samples", type=int, default=8)
     args = ap.parse_args()
 
-    T = json.load(open(args.transforms))
-    import time
-    now = time.time()
+    ips = args.pucks
+    if not ips:
+        if not os.path.exists(args.config):
+            sys.exit(f"no {args.config}; pass puck IPs on the command line")
+        ips = [p["ip"] for p in json.load(open(args.config)).get("pucks", [])]
+    if len(ips) < 2:
+        sys.exit("need at least two pucks to measure a separation")
 
-    # The whole measurement rests on this and the tool cannot check it. Two
-    # pucks resting 0.5 m apart on a desk produce exactly the same reading as
-    # two touching pucks misaligned by 0.5 m, and a stable number across runs
-    # is NOT evidence of co-location -- it just means nothing moved.
-    print("ASSUMES the pucks are physically touching RIGHT NOW.")
-    print("If they are not, this number is their real separation, not an error.\n")
+    # Sharing a map is the precondition. Without it the numbers below are
+    # meaningless rather than merely bad, so say so instead of reporting them.
+    roots = {}
+    for ip in ips:
+        dumpsys_pose(ip)                       # refreshes the on-device dump
+        roots[ip] = map_root(ip)
+        r, persistent = roots[ip]
+        print(f"  {ip:<16} map {r or 'none':<9} "
+              f"{'persistent' if persistent else 'TRANSIENT'}")
+    distinct = {r for r, _ in roots.values() if r}
+    if len(distinct) != 1 or not all(p for _, p in roots.values()):
+        print("\nthese pucks are NOT on one shared persistent map — "
+              "share a map first, or this measures nothing")
 
-    pos = {}
-    for ip, tr in T.items():
-        w = dumpsys_pose(ip)
-        age = (now - tr["unix_time"]) / 60.0
-        if w is None:
-            print(f"  {ip}: NOT TRACKING (6DoF invalid) — skipped")
+    print(f"\nsampling {args.samples}x, no transform applied (identity)")
+    horiz, full = [], []
+    for i in range(args.samples):
+        pos = {ip: dumpsys_pose(ip) for ip in ips}
+        if any(p is None for p in pos.values()):
+            print(f"  {i}: a puck is not tracking at 6DoF")
+            time.sleep(0.5)
             continue
-        pos[ip] = apply_4dof(w, tr["yaw_deg"], tr["t"])
-        print(f"  {ip}: world={[round(x, 3) for x in w]} -> "
-              f"map={[round(x, 3) for x in pos[ip]]}   "
-              f"(transform {age:.0f} min old, residual {tr['residual_deg']:.2f}°)")
+        a, b = pos[ips[0]], pos[ips[1]]
+        d = [a[k] - b[k] for k in range(3)]
+        h = math.hypot(d[0], d[2])
+        t = math.dist(a, b)
+        horiz.append(h)
+        full.append(t)
+        print(f"  {i}: horiz {h:.3f} m  3D {t:.3f} m   "
+              f"d=({d[0]:+.3f},{d[1]:+.3f},{d[2]:+.3f})")
+        time.sleep(0.3)
 
-    if len(pos) < 2:
-        print("\nneed two tracking pucks to compare")
-        return 1
-
-    print()
-    worst = 0.0
-    for (ia, a), (ib, b) in itertools.combinations(pos.items(), 2):
-        d = math.dist(a, b)
-        horiz = math.dist([a[0], a[2]], [b[0], b[2]])
-        vert = abs(a[1] - b[1])
-        worst = max(worst, d)
-        print(f"  {ia} <-> {ib}: {d:.3f} m   (horizontal {horiz:.3f}, vertical {vert:.3f})")
-        # 4-DoF cannot tilt, and Y is gravity-aligned, so a large VERTICAL
-        # error means something other than the yaw/translation solve is wrong.
-        if vert > 0.15:
-            print(f"      ^ vertical error is large — 4-DoF alignment cannot cause "
-                  f"this; suspect the pose source, not the transform")
-
-    print()
-    if worst <= args.expect:
-        print(f"  OK — within the {args.expect} m physical offset of two co-located headsets.")
-    else:
-        print(f"  MISALIGNED by {worst - args.expect:.2f} m beyond the expected "
-              f"{args.expect} m. Walk both pucks and localize again;")
-        print("  if it persists after a fresh localize on BOTH, the map itself is suspect.")
-    return 0
+    if not horiz:
+        sys.exit("no valid samples")
+    print(f"\nhorizontal: median {statistics.median(horiz):.3f} m  "
+          f"min {min(horiz):.3f}  max {max(horiz):.3f}")
+    print(f"3D        : median {statistics.median(full):.3f} m")
+    print("\nA steady vertical offset is mount geometry, not error. The "
+          "horizontal median is the colocation figure.")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

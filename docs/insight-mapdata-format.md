@@ -127,14 +127,14 @@ the map, but not clean." Both are true, and the second is what counts.**
 
 Dumping `.108`'s arenas while its mapdb was on disk, on the same PID:
 
-| | persisted (truth) | `MapDump.map_points()` | `point_blocks()` best |
+| | persisted (truth) | heap: strict f64-triple scan | heap: block heuristic, best |
 |---|---|---|---|
 | clouds found | 6 nodes | 2 runs | 4 room-like blocks |
 | sizes | 78/182/205/273/333/349 | 52, 144 | 426, 148, 70, 49 |
 | vertical std | 0.71–1.19 m | 0.02–0.03 m | 0.43–1.14 m |
 | own-NN spacing | **0.077–0.233 m** | — | **0.023, 0.025, 0.281, 0.000** |
 
-Nothing matches on size, and nothing matches on spacing. `map_points()` returns
+Nothing matches on size, and nothing matches on spacing. The strict scan returns
 flat sheets 0.03 m thick — a floor or boundary structure, not map points — and
 its `max_ystd=0.6` gate is below the 0.71–1.19 m that real nodes actually have,
 so it *could not* return them anyway. Raising the gate recovers nothing extra,
@@ -187,8 +187,10 @@ has no usable map for us today.
 ## When does the map actually persist?
 
 Both pucks have `persist.trackingservice.enable_map_db=1`, identical props and
-identical package sets, yet only `.108` has written anything. The difference is
-map maturity, not configuration:
+identical package sets, yet only `.108` has written anything. The obvious read
+of the numbers below is map maturity rather than configuration — **that read is
+wrong**, and the two subsections after it show why. It is recorded because the
+table is what anyone comparing two pucks will see first.
 
 | | `.108` | `.132` |
 |---|---|---|

@@ -15,7 +15,7 @@
 | [insight-map-and-anchors.md](insight-map-and-anchors.md) | The colocation binder API, transaction codes, signatures, and where each route is walled. |
 | [insight-slam-internals.md](insight-slam-internals.md) | What Insight is doing underneath: VIPER/VegaMapper, keyrigs, L1 nodes, descriptors. |
 | [wireless-adb.md](wireless-adb.md) | Getting adb over wifi on an Android 10 headset — no pairing code, no toggle. |
-| [quest1-hal.md](quest1-hal.md) / [quest1-sensors.md](quest1-sensors.md) | Device-level notes on the HAL and sensor stack. |
+| [quest1-sensors.md](quest1-sensors.md) | Device-level notes: factory calibration, the IMU stream, aligning time domains, and Insight's pose shared memory — including the gate that keeps that fast path shut. |
 
 ## Also
 

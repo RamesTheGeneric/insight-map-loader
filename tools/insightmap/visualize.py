@@ -7,18 +7,19 @@ in contrasting colours so overlap -- i.e. ALIGNMENT -- is visually obvious:
 aligned maps show the two clouds sitting on the same structure; misaligned ones
 show two offset/rotated copies of the room.
 
-  # one map
-  ./visualize.py --dump /tmp/imap_132 --base 0x7b5119c000 --out map132.html
+  # one map (a directory pulled from /vision/insideout/mapdb)
+  ./visualize.py --dump /tmp/mapdb132 --out map132.html
 
   # two maps, B optionally transformed by a solved 4-DoF T (yaw_deg + tx ty tz)
-  ./visualize.py --dump /tmp/imap_132 --base 0x7b5119c000 \
-                 --dump2 /tmp/imap_108 --base2 0x7cd7002000 \
+  ./visualize.py --dump /tmp/mapdb132 --dump2 /tmp/mapdb108 \
                  --yaw 12.5 --t 0.3 0 -1.2 --out align.html
 
-Points come from MapDump.point_blocks(), which is heuristic until the
-GraphNodeSoA pairing lands -- so treat cloud SHAPE as indicative and use the
-per-block view to spot the real room structure (large blocks, coplanar
-clusters) versus noise.
+For an orbitable 3D view of the same data, use `visualize3d.py`; this one is
+the flat-projection view, which is better for reading metric offsets.
+
+Points are exact: decoded from the persisted map, already resolved into the
+map's root frame. Each node is drawn in its own colour, so overlapping clouds
+from two pucks mean they share a frame.
 """
 import argparse
 import glob
@@ -28,28 +29,14 @@ import os
 
 import numpy as np
 
-import insightmap as im
 
 
-def load_points(dump_dir: str, base: int, min_block: int = 12) -> list[np.ndarray]:
-    # A PERSISTED mapdb beats any memory dump: exact points, already resolved
-    # into the root frame, no heuristics. Prefer it whenever the dir holds one.
-    if glob.glob(os.path.join(dump_dir, "nd_*_2.mapdata")):
-        import mapdata as md
-        return [n.points() for n in md.Map(dump_dir).nodes]
-    files = sorted(glob.glob(os.path.join(dump_dir, "arena*.bin")))
-    if not files:
-        raise SystemExit(f"no arena*.bin or nd_*.mapdata in {dump_dir}")
-    dump = im.MapDump([(f, base) for f in files], {})
-    # The real MapPoint runs (gravity-signature). Falls back to the old
-    # heuristic block scan only if a map yields nothing.
-    runs = [r for r in dump.map_points() if len(r) >= min_block]
-    if runs:
-        return runs
-    return [b for b in dump.point_blocks()
-            if len(b) >= min_block
-            and not all(abs(b[:, k].min()) < 1e-9 for k in range(3))
-            and b[:, 1].std() >= 0.05]
+def load_points(dump_dir: str) -> list[np.ndarray]:
+    """Per-node point clouds from a pulled mapdb, in the map's root frame."""
+    if not glob.glob(os.path.join(dump_dir, "nd_*_2.mapdata")):
+        raise SystemExit(f"no nd_*.mapdata in {dump_dir} — pull a mapdb first")
+    import mapdata as md
+    return [n.points() for n in md.Map(dump_dir).nodes]
 
 
 def apply_4dof(P: np.ndarray, yaw_deg: float, t) -> np.ndarray:
@@ -96,17 +83,14 @@ def svg_view(sets, ia, ib, w, h, pad, title, labels, colors):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dump", required=True)
-    ap.add_argument("--base", required=True, help="arena virtual base, e.g. 0x7b5119c000")
-    ap.add_argument("--dump2")
-    ap.add_argument("--base2")
+    ap.add_argument("--dump", required=True, help="a pulled mapdb directory")
+    ap.add_argument("--dump2", help="a second mapdb, drawn over the first")
     ap.add_argument("--yaw", type=float, default=0.0, help="apply yaw (deg) to map B")
     ap.add_argument("--t", type=float, nargs=3, default=[0, 0, 0], help="apply translation to map B")
-    ap.add_argument("--min-block", type=int, default=12)
     ap.add_argument("--out", default="insight_map.html")
     args = ap.parse_args()
 
-    A = load_points(args.dump, int(args.base, 16), args.min_block)
+    A = load_points(args.dump)
     PA = np.vstack(A) if A else np.zeros((0, 3))
     sets_all = [(PA, "#4fc3f7")]
     labels = [os.path.basename(args.dump.rstrip("/"))]
@@ -114,7 +98,7 @@ def main():
 
     PB = None
     if args.dump2:
-        B = load_points(args.dump2, int(args.base2 or args.base, 16), args.min_block)
+        B = load_points(args.dump2)
         PB = np.vstack(B) if B else np.zeros((0, 3))
         if args.yaw or any(args.t):
             PB = apply_4dof(PB, args.yaw, args.t)
@@ -154,8 +138,7 @@ def main():
 <ul>{"".join(f"<li>{s}</li>" for s in stats)}
 <li>Aligned maps overlap on the same structure; misaligned ones look like two
 offset or rotated copies of the room.</li>
-<li>Points are heuristic extractions (<code>point_blocks()</code>) until the
-GraphNodeSoA pairing lands — judge structure, not individual points.</li></ul>
+<li>Points are decoded from the persisted map, in its root frame.</li></ul>
 """
     open(args.out, "w").write(doc)
     print(f"wrote {args.out}")
