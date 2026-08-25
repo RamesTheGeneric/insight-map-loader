@@ -1,5 +1,5 @@
 [workspace]
-members = ["q2slam-core", "q2slam-gui"]
+members = ["insight-prime-core", "insight-prime-gui"]
 resolver = "2"
 
 [workspace.package]

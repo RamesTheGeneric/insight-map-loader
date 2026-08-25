@@ -20,7 +20,7 @@ target_include_directories(questtracker PRIVATE
     ${ANDROID_NDK}/sources/android/native_app_glue)
 
 # The upstream project also streamed frames from a UVC module bolted to the
-# headset, which needed libusb vendored under third_party/. Q2Slam reads the
+# headset, which needed libusb vendored under third_party/. Insight Prime reads the
 # Quest's own tracking cameras from a rooted native process instead, so that
 # path is compiled out -- it also never ran against real hardware upstream.
 target_compile_definitions(questtracker PRIVATE Q1T_UVC=0)

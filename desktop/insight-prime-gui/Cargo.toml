@@ -1,11 +1,11 @@
 [package]
-name = "q2slam-gui"
+name = "insight-prime-gui"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Desktop control surface for the Quest tracker pucks."
 
 [dependencies]
-q2slam-core = { path = "../q2slam-core" }
+insight-prime-core = { path = "../insight-prime-core" }
 eframe = "0.36"
 serde_json = "1"

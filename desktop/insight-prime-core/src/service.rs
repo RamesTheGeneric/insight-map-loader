@@ -503,10 +503,10 @@ fn request_kind(shared: &Shared, ip: &str, coldstart: bool, manual: bool, kind: 
 /// Where a puck's existing map is archived before it is overwritten. The
 /// directory docs/insight-map-lifecycle.md already names.
 fn map_backup_dir() -> std::path::PathBuf {
-    std::env::var_os("Q2_MAP_BACKUPS")
+    std::env::var_os("INSIGHT_MAP_BACKUPS")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("q2slam-backups")))
-        .unwrap_or_else(|| std::path::PathBuf::from("q2slam-backups"))
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("insight-prime-backups")))
+        .unwrap_or_else(|| std::path::PathBuf::from("insight-prime-backups"))
 }
 
 fn push_event(shared: &Shared, msg: String) {
@@ -780,7 +780,7 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, mpt2: Arc<Ingest>, shared: 
                     // rewriting entries that describe nothing being applied.
                     if !cfg.colocated && last_paircal.elapsed() >= Duration::from_secs(1) {
                         last_paircal = Instant::now();
-                        if std::env::var_os("Q2_PAIRDBG").is_some() {
+                        if std::env::var_os("INSIGHT_PAIRDBG").is_some() {
                             let m2n = mpt2.live().len();
                             let m1n = live1.len();
                             let pn: Vec<usize> = pairs.values().map(|q| q.len()).collect();
@@ -1446,7 +1446,7 @@ fn spawn_mapd(cfg: Config, shared: Arc<Shared>) -> Result<(), String> {
                 // land on the same path as a localize grab and silently
                 // destroy it -- which cost the post-mortem evidence the first
                 // time a localization asymmetry needed diagnosing.
-                let out = format!("/tmp/q2slam_{}_{}", dir_tag, req.ip.replace('.', "_"));
+                let out = format!("/tmp/insight_prime_{}_{}", dir_tag, req.ip.replace('.', "_"));
                 let grab = Command::new(".venv/bin/python")
                     .args(["tools/q1grab.py", &req.ip, "--out", &out, "--mode", mode])
                     .output();
@@ -1828,7 +1828,7 @@ fn spawn_bridge_watchdog(
 
                     // Cheap consistency check: does the current bridge still
                     // map LOCAL onto the Insight world pose?
-                    if std::env::var_os("Q2_DEBUG").is_some()
+                    if std::env::var_os("INSIGHT_DEBUG").is_some()
                         && now - w.last_check >= BRIDGE_CHECK_EVERY
                     {
                         eprintln!(
@@ -2015,7 +2015,7 @@ mod frame_jump_tests {
     /// emitting it) while every other puck is left untouched.
     #[test]
     fn invalidate_drops_only_the_jumped_puck() {
-        let dir = std::env::temp_dir().join("q2slam_fj_test");
+        let dir = std::env::temp_dir().join("insight_prime_fj_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("transforms.json");
         let p = path.to_str().unwrap();
@@ -2337,7 +2337,7 @@ fn create_map_job(
 
 /// Assign a new SteamVR role to a puck and make it take effect.
 ///
-/// The `device` id IS the role, so this rewrites q2slam.json, updates the live
+/// The `device` id IS the role, so this rewrites insight-prime.json, updates the live
 /// roster and pushes the new slot to the puck. Without the roster update the
 /// change is worse than useless: `build_transforms` keys off the OLD slot, the
 /// aggregator finds no transform for the new one, and the puck vanishes from

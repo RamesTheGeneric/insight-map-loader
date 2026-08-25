@@ -392,7 +392,7 @@ never write it.
 ### Mitigations and open routes
 
 1. **Back up the lineage.** It is ~5 MB and currently irreplaceable. Copies live
-   in `~/q2slam-backups/`.
+   in `~/insight-prime-backups/`.
 2. **Author a mapdb wholesale.** The format is fully decoded, so a synthetic map
    is writable in principle; the hard part is real points and descriptors for a
    room, and memory extraction is too coarse (0.278 m) to supply them.

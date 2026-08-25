@@ -25,7 +25,7 @@ assert PKT.size == 68, PKT.size
 DEV_WAIST, DEV_LFOOT, DEV_RFOOT = 0, 1, 2
 
 # Role ids, matching MapperDeviceId in steamvr_driver/src/mapper_protocol.h and
-# Device in q2slam-core/src/mpt1.rs. APPEND ONLY -- SteamVR keys pairings off
+# Device in insight-prime-core/src/mpt1.rs. APPEND ONLY -- SteamVR keys pairings off
 # the serial each id maps to.
 ROLES = {
     0: "waist", 1: "left_foot", 2: "right_foot", 3: "chest",

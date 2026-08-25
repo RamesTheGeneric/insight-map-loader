@@ -24,7 +24,7 @@ static const uint32_t kMapperMagic = 0x3154504Du;
 // APPEND ONLY. SteamVR keys pairings, role bindings and room calibration off
 // the serial derived from this id; renumbering 0/1/2 makes it forget every
 // tracker the user has ever set up. Keep in step with Device in
-// q2slam-core/src/mpt1.rs.
+// insight-prime-core/src/mpt1.rs.
 enum MapperDeviceId {
     MAPPER_DEV_WAIST          = 0,
     MAPPER_DEV_LEFT_FOOT      = 1,

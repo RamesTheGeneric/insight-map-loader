@@ -1,4 +1,4 @@
-//! Core of the Q2Slam desktop manager.
+//! Core of the Insight Prime desktop manager.
 //!
 //! Several rooted Quest headsets are worn as body trackers. Each one tracks
 //! itself well, but in its own arbitrary per-boot frame, so their poses are not

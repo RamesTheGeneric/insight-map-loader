@@ -69,7 +69,7 @@ A body puck is never worn, and a headset that believes it is off a head powers
 down before anything can start.
 
 ```sh
-./desktop/target/release/q2slam provision      # all pucks in q2slam.json
+./desktop/target/release/insight-prime provision      # all pucks in insight-prime.json
 ```
 
 or by hand:
@@ -106,7 +106,7 @@ a bracket rather than a toggle.
 
 ## 6. Add it to the fleet
 
-Edit `q2slam.json`:
+Edit `insight-prime.json`:
 
 ```json
 { "ip": "192.168.1.13", "device": 2 }
@@ -131,7 +131,7 @@ cases:
 **The fleet already has a map** (usual). Start the GUI, pick a source puck,
 press **⇄ Share map**. The new puck must be physically in that space and able
 to see mapped territory, or it will load the map and fail to relocalize into
-it. Its existing map is archived on-device and to `~/q2slam-backups/` first.
+it. Its existing map is archived on-device and to `~/insight-prime-backups/` first.
 
 **A brand-new space, nobody has a map.** Wear the puck, reach 6DOF, and press
 **✚ Create map** on its card. It brackets the guardian package around the
@@ -141,7 +141,7 @@ Confirm: every puck should report the **same** `topNodeUid`, marked
 `(persistent)`.
 
 ```sh
-./desktop/target/release/q2slam mapdb
+./desktop/target/release/insight-prime mapdb
 ```
 
 Full detail, including doing it by hand: `docs/insight-map-lifecycle.md`.
@@ -158,7 +158,7 @@ a day-old one showed a correctly colocated puck rotated 180°.
 ## 9. Assign its SteamVR role
 
 Pick from the dropdown on the puck's card. Applied live: it rewrites
-`q2slam.json`, updates the running service and reconfigures the puck.
+`insight-prime.json`, updates the running service and reconfigures the puck.
 
 | id | role | | id | role |
 |---|---|---|---|---|
@@ -194,16 +194,16 @@ has seven distinguishable colours and there are eleven roles.
 | tracker app healthy but nothing streams | guardian **package** enabled — step 5, then restart the app |
 | displays show passthrough instead of dark | same |
 | `setprop`/`chcon` silently do nothing | lost root to a reboot — step 2 |
-| puck absent from the GUI entirely | not in `q2slam.json`, or a duplicate `device` id |
+| puck absent from the GUI entirely | not in `insight-prime.json`, or a duplicate `device` id |
 | tracker rotated ~180° | stale bridge — step 8 |
 | puck loads the map but never relocalizes | it cannot *see* mapped territory: wrong room, blank wall, too dark |
 | puck sleeps when set down | `persist.oculus.forceHeadsetOn` missing — step 4 |
-| role change appears not to apply | restart the GUI; check `q2slam.json` actually changed |
+| role change appears not to apply | restart the GUI; check `insight-prime.json` actually changed |
 
 ## What this puck now has
 
 Config on the device: proximity defeated, guardian package disabled, screen and
-wifi sleep off, boot-start granted. On the host: an entry in `q2slam.json`, a
+wifi sleep off, boot-start granted. On the host: an entry in `insight-prime.json`, a
 role, a bridge, and a copy of the fleet's map.
 
 The only per-session step is the bridge. Everything else survives a reboot

@@ -38,12 +38,12 @@ create `android/q1tracker/local.properties` with `sdk.dir=/path/to/Android/Sdk`.
 cargo build --release --manifest-path desktop/Cargo.toml
 ```
 
-Produces `desktop/target/release/q2slam` (CLI) and `q2slam-gui`.
+Produces `desktop/target/release/insight-prime` (CLI) and `insight-prime-gui`.
 
 Then create your site config:
 
 ```sh
-cp desktop/q2slam.example.json q2slam.json
+cp desktop/insight-prime.example.json insight-prime.json
 ```
 
 Edit `host` to **your PC's LAN IP** — the pucks stream to it, so `127.0.0.1`

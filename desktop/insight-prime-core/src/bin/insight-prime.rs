@@ -1,13 +1,13 @@
-//! q2slam — bring up the pucks, bridge their frames, stream them as one.
+//! insight-prime — bring up the pucks, bridge their frames, stream them as one.
 //!
-//!     q2slam status              what every puck is doing, one line each
-//!     q2slam up                  connect + configure + launch the trackers
-//!     q2slam bridge              measure each puck's LOCAL→world transform
-//!     q2slam run                 ingest → align → emit shared-frame MPT1
-//!     q2slam identify            blink every puck's LED in its slot colour
-//!     q2slam provision           one-time: make every puck stream after any boot
+//!     insight-prime status              what every puck is doing, one line each
+//!     insight-prime up                  connect + configure + launch the trackers
+//!     insight-prime bridge              measure each puck's LOCAL→world transform
+//!     insight-prime run                 ingest → align → emit shared-frame MPT1
+//!     insight-prime identify            blink every puck's LED in its slot colour
+//!     insight-prime provision           one-time: make every puck stream after any boot
 //!
-//! Config is q2slam.json (see q2slam.example.json). The alignment transform
+//! Config is insight-prime.json (see insight-prime.example.json). The alignment transform
 //! comes from align_result.json, produced by tools/align_pool.py (cold start)
 //! and tools/align_map.py (refresh); `run` reloads it when the file changes,
 //! so a re-solve lands without restarting the service.
@@ -15,11 +15,11 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use q2slam_core::bridge::{self, PosePair};
-use q2slam_core::ingest::{Ingest, SlotState};
-use q2slam_core::mpt1::Device;
-use q2slam_core::config::Config;
-use q2slam_core::fleet;
+use insight_prime_core::bridge::{self, PosePair};
+use insight_prime_core::ingest::{Ingest, SlotState};
+use insight_prime_core::mpt1::Device;
+use insight_prime_core::config::Config;
+use insight_prime_core::fleet;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -29,13 +29,13 @@ fn main() {
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .cloned()
-        .unwrap_or_else(|| "q2slam.json".into());
+        .unwrap_or_else(|| "insight-prime.json".into());
 
     let cfg = match Config::load(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("cannot read {cfg_path}: {e}");
-            eprintln!("copy desktop/q2slam.example.json to q2slam.json and edit it");
+            eprintln!("copy desktop/insight-prime.example.json to insight-prime.json and edit it");
             std::process::exit(2);
         }
     };
@@ -49,7 +49,7 @@ fn main() {
         "provision" => provision(&cfg),
         "mapdb" => mapdb_cmd(&cfg),
         _ => {
-            eprintln!("usage: q2slam [status|up|bridge|run|identify|provision|mapdb] [--config q2slam.json]");
+            eprintln!("usage: insight-prime [status|up|bridge|run|identify|provision|mapdb] [--config insight-prime.json]");
             std::process::exit(2);
         }
     }
@@ -124,7 +124,7 @@ fn provision(cfg: &Config) {
         if all {
             "Done. Power-cycle a puck to confirm: it should appear in the stream unaided."
         } else {
-            "Some pucks are not provisioned; they still need `q2slam up` after a boot."
+            "Some pucks are not provisioned; they still need `insight-prime up` after a boot."
         }
     );
 }
@@ -180,7 +180,7 @@ fn up(cfg: &Config) {
             Err(e) => println!("configure failed: {e}"),
         }
     }
-    println!("give the XR sessions ~10 s, then `q2slam bridge`");
+    println!("give the XR sessions ~10 s, then `insight-prime bridge`");
 }
 
 fn bridge_cmd(cfg: &Config) -> i32 {
@@ -243,7 +243,7 @@ fn bridge_cmd(cfg: &Config) -> i32 {
 }
 
 fn run(cfg: &Config) -> i32 {
-    let service = match q2slam_core::service::Service::start(cfg.clone()) {
+    let service = match insight_prime_core::service::Service::start(cfg.clone()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");

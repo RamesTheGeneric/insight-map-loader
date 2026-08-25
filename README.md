@@ -20,14 +20,14 @@ the same coordinate frame.** Not approximately — natively, because the map's
 root node *is* the frame.
 
 ```
-  puck (Quest 1)                    host                     SteamVR
-  ┌──────────────┐   MPT1/UDP   ┌──────────────┐   MPT1   ┌──────────────┐
-  │ Insight SLAM │─────────────▶│ q2slam-core  │─────────▶│ driver_mapper│
-  │ q1tracker app│   pose 100Hz │ ingest+bridge│  udp/5181│ GenericTracker│
-  └──────────────┘              └──────────────┘          └──────────────┘
-        ▲                              │
-        │ shared map (mapdb)           │ adb: status, map share, roles
-        └──────────────────────────────┘
+  puck (Quest 1)                   host                        SteamVR
+  ┌───────────────┐  MPT1/UDP  ┌──────────────────┐  MPT1  ┌────────────────┐
+  │ Insight SLAM  │───────────▶│ insight-prime    │───────▶│ driver_mapper  │
+  │ q1tracker app │  pose 100Hz│ ingest + bridge  │udp/5181│ GenericTrackers│
+  └───────────────┘            └──────────────────┘        └────────────────┘
+         ▲                              │
+         │ shared map (mapdb)           │ adb: status, map share, roles
+         └──────────────────────────────┘
 ```
 
 Every puck runs an OpenXR app that streams its pose. The host aggregates them
@@ -55,8 +55,8 @@ truth, because two co-located pucks cannot lie to each other.
 | | |
 |---|---|
 | `android/q1tracker/` | the on-puck OpenXR app — streams pose as MPT1 over UDP |
-| `desktop/q2slam-core/` | host service: ingest, bridge watchdog, fleet control, map jobs |
-| `desktop/q2slam-gui/` | the control surface (egui) — fleet status, map sharing, roles |
+| `desktop/insight-prime-core/` | host service: ingest, bridge watchdog, fleet control, map jobs |
+| `desktop/insight-prime-gui/` | the control surface (egui) — fleet status, map sharing, roles |
 | `desktop/steamvr_driver/` | OpenVR driver exposing up to 11 generic trackers |
 | `tools/insightmap/` | decode, match, visualise and self-test Insight's SLAM map |
 | `tools/` | fleet bring-up and diagnostics over adb |

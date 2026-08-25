@@ -1,18 +1,18 @@
-# q2slam desktop
+# insight-prime desktop
 
 The manager that turns the tracker pucks into one tracking system: it brings
 the headsets up, bridges their frames, and streams every puck's pose in a
 single shared frame.
 
 ```
-cp desktop/q2slam.example.json q2slam.json    # edit IPs + host address
+cp desktop/insight-prime.example.json insight-prime.json    # edit IPs + host address
 cargo build --release --manifest-path desktop/Cargo.toml
 
-q2slam up        # adb connect, write tracker config (one MPT1 slot per puck,
+insight-prime up        # adb connect, write tracker config (one MPT1 slot per puck,
                  # controllers off), defeat the prox gate, launch the app
-q2slam status    # per puck: Insight level, battery, tracker up, VPN trap
-q2slam run       # the service: ingest -> bridge -> alignment -> shared-frame
-                 # MPT1 to `out`. Bridging is AUTOMATIC (see below); `q2slam
+insight-prime status    # per puck: Insight level, battery, tracker up, VPN trap
+insight-prime run       # the service: ingest -> bridge -> alignment -> shared-frame
+                 # MPT1 to `out`. Bridging is AUTOMATIC (see below); `insight-prime
                  # bridge` remains as a manual override.
 ```
 
@@ -58,18 +58,18 @@ identical shared-frame positions to the centimetre, 71-72 Hz per puck through
 the full pipeline, timestamps rewritten to the host clock so the downstream
 latency estimator sees one epoch.
 
-Layout: `q2slam-core/` is the UI-free library (wire format, ingest, transforms,
-bridge, fleet, aggregator -- 13 unit tests) plus the `q2slam` CLI binary.
-`q2slam-gui/` (egui) is the same pipeline with a window on it: fleet cards with
+Layout: `insight-prime-core/` is the UI-free library (wire format, ingest, transforms,
+bridge, fleet, aggregator -- 13 unit tests) plus the `insight-prime` CLI binary.
+`insight-prime-gui/` (egui) is the same pipeline with a window on it: fleet cards with
 per-puck health, buttons for launch / bridge / re-solve, a live top-down view
 of every puck in the shared frame with trails and the separation readout, and
 a status bar (per-slot Hz and age, packets out, current alignment yaw).
 The GUI runs the aggregation itself on a background thread, so it IS the
-service while it is open -- run either the GUI or `q2slam run`, not both (they
+service while it is open -- run either the GUI or `insight-prime run`, not both (they
 would fight over the listen port; the loser tells you).
 
 ```
-cargo run --release -p q2slam-gui     # from the repo root
+cargo run --release -p insight-prime-gui     # from the repo root
 ```
 
 The alignment *solvers* stay in `tools/` (they need OpenCV); the core consumes
@@ -90,7 +90,7 @@ cd desktop/steamvr_driver && cmake -B build && cmake --build build
 # restart SteamVR; it logs "mapper: init ok, listening on udp/5181"
 ```
 
-It listens on udp/5181 — the q2slam service's `out` — because 5180 on this
+It listens on udp/5181 — the insight-prime service's `out` — because 5180 on this
 host belongs to the puck→service ingest. One manual step remains and is
 expected: the shared frame and the HMD's universe are different spaces, so run
 OpenVR-SpaceCalibrator (or the game's own calibration) once per play session

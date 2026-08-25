@@ -3,7 +3,7 @@
 # NDK if present, else the first aarch64 clang on PATH.
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
-NDK="$HOME/Documents/GitHub/Q2Slam/ndk/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin"
+NDK="$HOME/Documents/GitHub/Insight Prime/ndk/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin"
 CC="$NDK/aarch64-linux-android29-clang"
 [ -x "$CC" ] || CC=$(command -v aarch64-linux-android29-clang || true)
 [ -x "$CC" ] || { echo "no aarch64 android clang found (set NDK)"; exit 1; }

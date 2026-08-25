@@ -1,11 +1,11 @@
 //! Configuration and the on-disk transform files.
 //!
 //! Three JSON files, one owner each:
-//! * `q2slam.json` — the site config: puck IPs, slots, addresses. Human-edited.
+//! * `insight-prime.json` — the site config: puck IPs, slots, addresses. Human-edited.
 //! * `align_result.json` — the inter-puck alignment, written by the solvers
 //!   (tools/align_pool.py, tools/align_map.py). Reloaded on change.
 //! * `bridge.json` — each puck's XR-LOCAL→Insight-world transform for the
-//!   current tracker session, written by `q2slam bridge` (or the GUI).
+//!   current tracker session, written by `insight-prime bridge` (or the GUI).
 
 use std::collections::BTreeMap;
 
@@ -375,7 +375,7 @@ mod write_tests {
     use super::*;
 
     fn tmpfile(name: &str, body: &str) -> String {
-        let p = std::env::temp_dir().join(format!("q2slam_cfgtest_{name}.json"));
+        let p = std::env::temp_dir().join(format!("insight_prime_cfgtest_{name}.json"));
         std::fs::write(&p, body).unwrap();
         p.to_string_lossy().into_owned()
     }
