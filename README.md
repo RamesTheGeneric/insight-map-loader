@@ -67,6 +67,10 @@ truth, because two co-located pucks cannot lie to each other.
 Start with **[INSTALL.md](INSTALL.md)**, then **[docs/puck-bringup.md](docs/puck-bringup.md)**
 for each headset.
 
+Working on the code instead? **[docs/development.md](docs/development.md)** for
+the build-and-iterate loop (including how much runs with no headsets at all),
+and **[CONTRIBUTING.md](CONTRIBUTING.md)** for what is useful to send.
+
 ## Requirements
 
 - **Rooted Quest 1s.** Rooting is out of scope here; without root none of this

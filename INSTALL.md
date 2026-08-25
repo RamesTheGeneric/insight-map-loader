@@ -5,6 +5,10 @@ that aggregates them, and the **SteamVR driver** that presents them as trackers.
 Then each headset is brought up individually — see
 [docs/puck-bringup.md](docs/puck-bringup.md).
 
+> Building it to *change* it rather than to use it?
+> [docs/development.md](docs/development.md) covers the iterate loop and the
+> parts that need no hardware.
+
 > Verified on Linux with two rooted Quest 1s. The driver also builds on Windows,
 > which is where it must be built if SteamVR runs there. Nothing here has been
 > reproduced on another person's hardware yet.

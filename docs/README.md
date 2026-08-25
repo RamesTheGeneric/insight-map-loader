@@ -6,6 +6,7 @@
 |---|---|
 | [puck-bringup.md](puck-bringup.md) | **Setting up a headset**, from freshly-rooted to streaming. Ten steps, each with the reason it exists, and a troubleshooting table keyed by symptom. |
 | [insight-map-lifecycle.md](insight-map-lifecycle.md) | **Create / share / extend / read** the shared map — the operational reference for colocation. |
+| [development.md](development.md) | **Working on the code**: building each component, the iterate loop, and how much of this is reachable with no headsets at all. |
 
 ## Reference
 
@@ -23,6 +24,8 @@
   failure modes. Probably the most useful file here if you are doing similar
   reverse engineering.
 - [../INSTALL.md](../INSTALL.md) — building the three components.
+- [../CONTRIBUTING.md](../CONTRIBUTING.md) — what is useful to contribute, the
+  bar for a change, and what must never be committed.
 
 These documents describe **observed behaviour of a device you own**. Where a
 format or interface is written down, it is a description recovered by
