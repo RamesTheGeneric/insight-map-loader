@@ -95,9 +95,14 @@ def match_points(dA, iA, dB, iB, ratio: float = 0.9, max_dist: int = 110,
 def kabsch(P: np.ndarray, Q: np.ndarray):
     """R,t minimising |P - (R Q + t)|."""
     cp, cq = P.mean(0), Q.mean(0)
+    # H = sum(q p^T); Kabsch gives R = V D U^T for H = U S V^T. Writing
+    # U D V^T instead returns the TRANSPOSE, i.e. the inverse rotation -- which
+    # is invisible whenever the true rotation is identity, so every
+    # self-match control passes while every real alignment is scored against a
+    # rotation pointing the wrong way.
     U, _, Vt = np.linalg.svd((Q - cq).T @ (P - cp))
-    D = np.diag([1.0, 1.0, np.sign(np.linalg.det(U @ Vt))])
-    R = U @ D @ Vt
+    D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Vt.T @ U.T))])
+    R = Vt.T @ D @ U.T
     return R, cp - R @ cq
 
 
@@ -111,8 +116,12 @@ def yaw_kabsch(P: np.ndarray, Q: np.ndarray):
     zp = p[:, 0] + 1j * p[:, 2]
     zq = q[:, 0] + 1j * q[:, 2]
     th = np.angle(np.sum(np.conj(zq) * zp))
+    # th is the angle that carries q INTO p, so the matrix must apply +th:
+    # (x + iz) -> e^(i th)(x + iz) is x' = cx - sz, z' = sx + cz. Building
+    # [[c,0,s],[0,1,0],[-s,0,c]] applies e^(-i th) -- the inverse -- and is
+    # indistinguishable from correct at th = 0.
     c, s = np.cos(th), np.sin(th)
-    R = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    R = np.array([[c, 0, -s], [0, 1, 0], [s, 0, c]])
     return R, cp - R @ cq
 
 
