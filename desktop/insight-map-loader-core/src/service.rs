@@ -178,11 +178,14 @@ pub struct Service {
     pub ingest: Arc<Ingest>,
     /// Path to bridge.json, so a job can wait for a re-bridge to land.
     bridge_path: String,
-    /// Enough of the config for jobs that must reconfigure a puck.
-    pucks: Vec<crate::config::PuckCfg>,
     host: String,
     listen_port: u16,
 }
+
+// There is deliberately NO puck list cached here. Roles are reassignable at
+// runtime, so the only truthful source is `shared.pucks` via `roster()`; a
+// convenience copy taken at startup went stale the first time someone changed
+// a role, and every reader of it then agreed with itself about the wrong slot.
 
 impl Service {
     pub fn view(&self) -> View {
@@ -284,8 +287,13 @@ impl Service {
         let job = Job::new(id, format!("Create a map on {ip}"), steps);
 
         let target = ip.to_string();
+        // The LIVE roster, not a startup snapshot. This job ends by rewriting
+        // the puck's tracker config with its slot, so reading a stale roster
+        // would silently revert a role assigned since launch -- and because the
+        // liveness check below reads the same stale id, it would then confirm
+        // "streaming" and report success. Wrong slot, green job.
         let device = self
-            .pucks
+            .roster()
             .iter()
             .find(|p| p.ip == target)
             .and_then(|p| Device::from_u8(p.device));
@@ -350,11 +358,10 @@ impl Service {
         spawn_aggregate(cfg.clone(), Arc::clone(&ingest), Arc::clone(&shared))?;
         spawn_bridge_watchdog(cfg.clone(), Arc::clone(&ingest), Arc::clone(&shared))?;
         let bridge_path = cfg.bridge.clone();
-        let pucks = cfg.pucks.clone();
         let host = cfg.host.clone();
         let listen_port =
             cfg.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(5180);
-        Ok(Service { shared, ingest, bridge_path, pucks, host, listen_port })
+        Ok(Service { shared, ingest, bridge_path, host, listen_port })
     }
 }
 
@@ -589,30 +596,57 @@ fn spawn_bridge_watchdog(
     std::thread::Builder::new()
         .name("bridge-watch".into())
         .spawn(move || {
-            let mut watches: Vec<PuckWatch> = cfg
-                .pucks
-                .iter()
-                .filter_map(|p| {
-                    Some(PuckWatch {
-                        ip: p.ip.clone(),
-                        device: Device::from_u8(p.device)?,
-                        history: VecDeque::new(),
-                        suspect: 0,
-                        last_check: Instant::now() - BRIDGE_CHECK_EVERY,
-                        state: BridgeState::Missing,
-                        yaw_deg: f32::NAN,
-                    })
-                })
-                .collect();
+            // Each watch is keyed by the puck's SLOT, and a role change moves
+            // that slot. Built once from the startup config, the watchdog would
+            // go on reading a device id nothing feeds any more: `ingest.sample`
+            // returns None forever, every check is skipped, and the puck simply
+            // stops being bridged -- with no error, because "no sample yet" is
+            // indistinguishable from a puck that has not started streaming.
+            // So the roster is re-read whenever it changes, exactly as the
+            // aggregate thread does.
+            let mut watches: Vec<PuckWatch> = Vec::new();
+            let mut roster_seen = u64::MAX;
             let mut bridges = config::load_bridges(&cfg.bridge).unwrap_or_default();
-            for w in &mut watches {
-                if let Some(b) = bridges.get(&w.ip) {
-                    w.state = BridgeState::Ok;
-                    w.yaw_deg = b.yaw_deg;
-                }
-            }
 
             loop {
+                // Re-key the watches when the roster changes. Existing entries
+                // keep their state and history by ip -- a role change moves a
+                // puck's slot, it does not invalidate what we know about that
+                // puck's bridge.
+                let generation = shared.roster_gen.load(Ordering::Relaxed);
+                if generation != roster_seen {
+                    roster_seen = generation;
+                    let roster = shared.pucks.read().unwrap().clone();
+                    let mut rebuilt: Vec<PuckWatch> = Vec::with_capacity(roster.len());
+                    for p in &roster {
+                        let Some(device) = Device::from_u8(p.device) else { continue };
+                        match watches.iter().position(|w| w.ip == p.ip) {
+                            Some(i) => {
+                                let mut w = watches.swap_remove(i);
+                                if w.device != device {
+                                    // Different slot: the pose history belongs
+                                    // to the old one and must not be mixed in.
+                                    w.device = device;
+                                    w.history.clear();
+                                }
+                                rebuilt.push(w);
+                            }
+                            None => rebuilt.push(PuckWatch {
+                                ip: p.ip.clone(),
+                                device,
+                                history: VecDeque::new(),
+                                suspect: 0,
+                                last_check: Instant::now() - BRIDGE_CHECK_EVERY,
+                                state: bridges
+                                    .get(&p.ip)
+                                    .map_or(BridgeState::Missing, |_| BridgeState::Ok),
+                                yaw_deg: bridges.get(&p.ip).map_or(f32::NAN, |b| b.yaw_deg),
+                            }),
+                        }
+                    }
+                    watches = rebuilt;
+                }
+
                 let force = shared.bridge_now.swap(false, Ordering::Relaxed);
                 let verify_now: std::collections::BTreeSet<String> =
                     std::mem::take(&mut *shared.verify.lock().unwrap());
