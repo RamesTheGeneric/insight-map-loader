@@ -26,6 +26,10 @@ pub struct Aggregator {
     /// LOCAL→shared per device slot. A slot with no transform is not emitted:
     /// an unaligned pose in an aligned stream is worse than a missing one.
     pub transforms: BTreeMap<Device, Frame4Dof>,
+    /// Source byte -> SteamVR role. A source not in this map is an unknown
+    /// puck: counted and reported, never published under a guessed role.
+    pub roles: BTreeMap<u8, Device>,
+    pub skipped_unknown_src: u64,
     last_emitted_t: BTreeMap<Device, u64>,
     pub emitted: u64,
     pub skipped_no_transform: u64,
@@ -51,6 +55,8 @@ impl Aggregator {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{dest}: {e}"))
             })?,
             transforms: BTreeMap::new(),
+            roles: BTreeMap::new(),
+            skipped_unknown_src: 0,
             last_emitted_t: BTreeMap::new(),
             emitted: 0,
             skipped_no_transform: 0,
@@ -63,7 +69,13 @@ impl Aggregator {
         let mut summary = TickSummary::default();
         let mut speeds: Vec<f32> = Vec::new();
         for sample in ingest.live() {
-            let device = sample.packet.device;
+            // The source byte identifies the PUCK; the role it publishes as is
+            // the host's decision. Resolve here, and re-stamp on emit, so the
+            // two namespaces never leak into each other.
+            let Some(&device) = self.roles.get(&sample.packet.src) else {
+                self.skipped_unknown_src += 1;
+                continue;
+            };
             let Some(tr) = self.transforms.get(&device) else {
                 self.skipped_no_transform += 1;
                 continue;
@@ -120,9 +132,14 @@ mod tests {
             Device::Waist,
             Frame4Dof { yaw: std::f32::consts::FRAC_PI_2, t: [1.0, 0.0, 0.0] },
         );
+        // A source with no role is not published, so the map has to say which
+        // role this puck's id means. Id 7 deliberately differs from the role's
+        // own number: that difference IS the feature -- the wire carries the
+        // puck's identity and the host decides the role.
+        agg.roles.insert(7, Device::Waist);
 
         let pkt = Packet {
-            device: Device::Waist,
+            src: 7,
             valid: true,
             battery_pct: 50,
             charging: false,

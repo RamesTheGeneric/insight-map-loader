@@ -37,7 +37,35 @@ fn d_bridge() -> String { "bridge.json".into() }
 #[derive(Deserialize, Clone)]
 pub struct PuckCfg {
     pub ip: String,
+    /// The SteamVR role this puck should appear as. Host-side only: the puck
+    /// itself does not know or care.
     pub device: u8,
+    /// The id this puck stamps into every packet, assigned once at provision.
+    ///
+    /// Absent means the LEGACY arrangement, where the puck stamps its role
+    /// directly and reassigning a role means rewriting the puck's config and
+    /// restarting its tracker -- which also moves its OpenXR LOCAL frame and so
+    /// invalidates its bridge. With an id set, a role change is a host-side
+    /// edit that takes effect on the next packet.
+    #[serde(default)]
+    pub id: Option<u8>,
+}
+
+/// Map the byte a puck stamps onto the role it should be published as.
+///
+/// A puck with `id` set is keyed by that id; one without is keyed by its role,
+/// which makes the legacy arrangement a special case of the same lookup rather
+/// than a separate code path. Returns None-able entries by construction: an
+/// unrecognised source byte is deliberately NOT in the map, so the caller can
+/// report an unknown puck instead of silently adopting whatever slot it claims.
+pub fn source_to_role(pucks: &[PuckCfg]) -> BTreeMap<u8, Device> {
+    let mut m = BTreeMap::new();
+    for p in pucks {
+        if let Some(role) = Device::from_u8(p.device) {
+            m.insert(p.id.unwrap_or(p.device), role);
+        }
+    }
+    m
 }
 
 impl Config {
@@ -122,6 +150,46 @@ pub fn set_puck_device(path: &str, ip: &str, device: u8) -> Result<(), String> {
         f.sync_all().map_err(|e| format!("{tmp}: {e}"))?;
     }
     std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn puck(ip: &str, device: u8, id: Option<u8>) -> PuckCfg {
+        PuckCfg { ip: ip.into(), device, id }
+    }
+
+    #[test]
+    fn a_provisioned_puck_is_keyed_by_its_id_not_its_role() {
+        let m = source_to_role(&[puck("a", 3, Some(200))]);
+        assert_eq!(m.get(&200), Some(&Device::Chest));
+        // The role number must NOT also resolve: only the id is on the wire,
+        // and accepting the role too would let a stale puck claim the slot.
+        assert_eq!(m.get(&3), None);
+    }
+
+    #[test]
+    fn a_legacy_puck_is_keyed_by_its_role() {
+        let m = source_to_role(&[puck("a", 3, None)]);
+        assert_eq!(m.get(&3), Some(&Device::Chest));
+    }
+
+    #[test]
+    fn reassigning_a_role_does_not_change_what_the_puck_sends() {
+        // The whole point: same id, different role, no device round trip.
+        let before = source_to_role(&[puck("a", 0, Some(42))]);
+        let after = source_to_role(&[puck("a", 5, Some(42))]);
+        assert_eq!(before.get(&42), Some(&Device::Waist));
+        assert_eq!(after.get(&42), Some(&Device::RightKnee));
+        assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_unknown_source_resolves_to_nothing() {
+        let m = source_to_role(&[puck("a", 0, Some(1))]);
+        assert_eq!(m.get(&99), None, "an unclaimed id must not be adopted");
+    }
 }
 
 #[derive(Deserialize, Clone)]

@@ -87,6 +87,9 @@ pub struct View {
     pub live: Vec<(Device, [f32; 3])>,
     pub sep: Option<f32>,
     pub slots: Vec<(Device, SlotState, f32, f32)>, // state, age s, rate Hz
+    /// Sources sending valid MPT1 that no config entry claims. Surfaced
+    /// rather than dropped: this is what an unprovisioned puck looks like.
+    pub unknown_sources: Vec<u8>,
     pub emitted: u64,
     pub n_transforms: usize,
     /// Long fleet operations, newest last. Snapshot, like `events`.
@@ -292,11 +295,15 @@ impl Service {
         // would silently revert a role assigned since launch -- and because the
         // liveness check below reads the same stale id, it would then confirm
         // "streaming" and report success. Wrong slot, green job.
-        let device = self
+        // The source byte this puck stamps -- what step 5 must watch for to
+        // prove the tracker came back. Read from the LIVE roster: a startup
+        // snapshot goes stale the moment anyone reassigns a role, and both the
+        // write and the check would then agree about the wrong slot.
+        let src = self
             .roster()
             .iter()
             .find(|p| p.ip == target)
-            .and_then(|p| Device::from_u8(p.device));
+            .map(|p| p.id.unwrap_or(p.device));
         let host = self.host.clone();
         let port = self.listen_port;
         let ingest = Arc::clone(&self.ingest);
@@ -304,7 +311,7 @@ impl Service {
         let req = crate::jobs::JobRequest {
             job,
             run: Box::new(move |ctx| {
-                create_map_job(ctx, &target, roomscale, device, &host, port, &ingest)
+                create_map_job(ctx, &target, roomscale, src, &host, port, &ingest)
             }),
         };
         let tx = self.shared.job_tx.lock().unwrap();
@@ -428,6 +435,11 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Res
                     ip_of = roster.iter().map(|p| (p.device, p.ip.clone())).collect();
                     let bridges = config::load_bridges(&cfg.bridge).unwrap_or_default();
                     agg.transforms = config::build_transforms_for(&roster, &bridges);
+                    // Rebuilt with the transforms: a role change alters which
+                    // role a source publishes as, and the two must never
+                    // disagree or a puck emits under one role with another's
+                    // transform.
+                    agg.roles = config::source_to_role(&roster);
                     // Any transform change moves everything; old statistics lie.
                     drift.reset();
                     last_pose.clear();
@@ -436,7 +448,7 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Res
 
                 let summary = agg.tick(&ingest);
                 for s in ingest.live() {
-                    let d = s.packet.device as u8;
+                    let d = s.packet.src;
                     if last_t.get(&d) != Some(&s.packet.t_ns) {
                         last_t.insert(d, s.packet.t_ns);
                         *counts.entry(d).or_default() += 1;
@@ -448,7 +460,7 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Res
                 // behind the ones before it. A reboot resets the tracker's
                 // LOCAL frame, which is exactly what the bridge describes.
                 for smp in ingest.live() {
-                    let d = smp.packet.device as u8;
+                    let d = smp.packet.src;
                     if let Some(&(t_prev, _)) = last_pose.get(&d) {
                         if smp.packet.t_ns + 3_600_000_000_000 < t_prev {
                             if let Some(ip) = ip_of.get(&d) {
@@ -492,7 +504,7 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Res
                 // Teleports: a pose jumping faster than a human moves is a
                 // frame event, not motion. Route it to the bridge watchdog.
                 for smp in ingest.live() {
-                    let d = smp.packet.device as u8;
+                    let d = smp.packet.src;
                     let p = smp.packet.pose.p;
                     if let Some(&(t_prev, p_prev)) = last_pose.get(&d) {
                         let dt = smp.packet.t_ns.saturating_sub(t_prev) as f32 / 1e9;
@@ -549,14 +561,22 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Res
                     } else {
                         v.slots.iter().map(|(d, _, _, r)| (*d as u8, *r)).collect()
                     };
-                    v.slots = ingest
-                        .all()
-                        .into_iter()
-                        .map(|(d, st, s)| {
-                            let age = s.map(|x| x.age().as_secs_f32()).unwrap_or(f32::NAN);
-                            (d, st, age, rates.get(&(d as u8)).copied().unwrap_or(0.0))
-                        })
-                        .collect();
+                    // Report by ROLE, since that is what the operator assigned
+                    // and what SteamVR shows -- but keep a separate list of
+                    // sources with no role, so an unprovisioned or misconfigured
+                    // puck is visible rather than merely absent.
+                    let mut slots = Vec::new();
+                    let mut unknown = Vec::new();
+                    for (src, st, s) in ingest.all() {
+                        let age = s.map(|x| x.age().as_secs_f32()).unwrap_or(f32::NAN);
+                        let rate = rates.get(&src).copied().unwrap_or(0.0);
+                        match agg.roles.get(&src) {
+                            Some(&role) => slots.push((role, st, age, rate)),
+                            None => unknown.push(src),
+                        }
+                    }
+                    v.slots = slots;
+                    v.unknown_sources = unknown;
                     v.emitted = agg.emitted;
                     v.n_transforms = agg.transforms.len();
                     v.jobs = shared.jobs.snapshot();
@@ -580,7 +600,10 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Res
 
 struct PuckWatch {
     ip: String,
-    device: Device,
+    /// The byte this puck stamps, NOT its role. A role reassignment must not
+    /// move the watch: the bridge belongs to the device, not to the slot it
+    /// currently publishes under.
+    src: u8,
     history: VecDeque<(Instant, [f32; 3])>,
     suspect: u32,
     last_check: Instant,
@@ -619,21 +642,27 @@ fn spawn_bridge_watchdog(
                     let roster = shared.pucks.read().unwrap().clone();
                     let mut rebuilt: Vec<PuckWatch> = Vec::with_capacity(roster.len());
                     for p in &roster {
-                        let Some(device) = Device::from_u8(p.device) else { continue };
+                        // Follow the SOURCE, not the role. A puck that gets
+                        // reassigned keeps streaming the same bytes from the
+                        // same device, so its pose history stays valid and its
+                        // bridge -- which describes that device, not that slot
+                        // -- is untouched. Under the old role-keyed scheme a
+                        // reassignment looked like a new puck and threw both away.
+                        let src = p.id.unwrap_or(p.device);
                         match watches.iter().position(|w| w.ip == p.ip) {
                             Some(i) => {
                                 let mut w = watches.swap_remove(i);
-                                if w.device != device {
-                                    // Different slot: the pose history belongs
-                                    // to the old one and must not be mixed in.
-                                    w.device = device;
+                                if w.src != src {
+                                    // Only a re-provision changes this, and then
+                                    // the history really does belong elsewhere.
+                                    w.src = src;
                                     w.history.clear();
                                 }
                                 rebuilt.push(w);
                             }
                             None => rebuilt.push(PuckWatch {
                                 ip: p.ip.clone(),
-                                device,
+                                src,
                                 history: VecDeque::new(),
                                 suspect: 0,
                                 last_check: Instant::now() - BRIDGE_CHECK_EVERY,
@@ -652,7 +681,7 @@ fn spawn_bridge_watchdog(
                     std::mem::take(&mut *shared.verify.lock().unwrap());
                 for w in &mut watches {
                     let verify_hit = verify_now.contains(&w.ip);
-                    let sample = ingest.sample(w.device);
+                    let sample = ingest.sample(w.src);
                     let Some(s) = sample else { continue };
                     if !s.packet.valid || s.age() > Duration::from_millis(300) {
                         continue;
@@ -710,7 +739,7 @@ fn spawn_bridge_watchdog(
                         let mut pairs = Vec::new();
                         for _ in 0..10 {
                             let Some(world) = fleet::dumpsys_pose(&w.ip) else { continue };
-                            let Some(s2) = ingest.sample(w.device) else { continue };
+                            let Some(s2) = ingest.sample(w.src) else { continue };
                             if !s2.packet.valid || s2.age() > Duration::from_millis(120) {
                                 continue;
                             }
@@ -1143,7 +1172,7 @@ fn create_map_job(
     ctx: &mut crate::jobs::JobCtx,
     ip: &str,
     roomscale: bool,
-    device: Option<Device>,
+    src: Option<u8>,
     host: &str,
     port: u16,
     ingest: &Ingest,
@@ -1185,8 +1214,9 @@ fn create_map_job(
 
     // ---- 4. put the tracker back, with its slot re-written
     ctx.begin(3);
-    let dev = device.map(|d| d as u8).unwrap_or(0);
-    fleet::configure_tracker(ip, host, port, dev)
+    // Write the puck's SOURCE byte -- its id if provisioned, its role under
+    // the legacy arrangement. Either way it is what the puck stamps.
+    fleet::configure_tracker(ip, host, port, src.unwrap_or(0))
         .map_err(|e| format!("restarting the tracker app: {e}"))?;
     ctx.finish_ok("tracker app restarted");
 
@@ -1196,7 +1226,7 @@ fn create_map_job(
     let start = Instant::now();
     let mut live = false;
     while start.elapsed() < Duration::from_secs(60) {
-        if let Some(d) = device {
+        if let Some(d) = src {
             if ingest.state(d) == crate::ingest::SlotState::Live {
                 live = true;
                 break;
@@ -1315,18 +1345,36 @@ fn set_role_job(
     shared.rebuild.store(true, Ordering::Relaxed);
     ctx.finish_ok("roster updated, transforms rebuilding");
 
-    // ---- 3. the puck itself: config.txt carries the slot it streams on
+    // ---- 3. the puck itself -- ONLY if it cannot be relabelled host-side.
+    //
+    // A provisioned puck stamps a stable id and the host maps that id to a
+    // role, so reassigning a role is the config edit above and nothing more:
+    // no push, no tracker restart, and critically no restart-induced LOCAL
+    // frame change, which would otherwise invalidate the puck's bridge and
+    // force a re-solve for what is purely a relabel.
+    //
+    // A legacy puck has no id and stamps its role directly, so for those the
+    // old push-and-restart is still the only way.
     ctx.begin(2);
-    fleet::configure_tracker(ip, host, port, device)
-        .map_err(|e| format!("reconfiguring {ip}: {e}"))?;
-    ctx.finish_ok("tracker reconfigured and restarted");
+    let src = shared.pucks.read().unwrap().iter()
+        .find(|p| p.ip == ip).and_then(|p| p.id);
+    match src {
+        Some(_) => ctx.finish_ok("no device change needed (puck has a stable id)"),
+        None => {
+            fleet::configure_tracker(ip, host, port, device)
+                .map_err(|e| format!("reconfiguring {ip}: {e}"))?;
+            ctx.finish_ok("legacy puck: tracker reconfigured and restarted");
+        }
+    }
 
-    // ---- 4. prove it
+    // ---- 4. prove it. Watch the SOURCE byte: for a provisioned puck that is
+    // unchanged and should still be Live within a packet or two.
     ctx.begin(3);
+    let watch = src.unwrap_or(device);
     let start = Instant::now();
     let mut live = false;
     while start.elapsed() < Duration::from_secs(45) {
-        if ingest.state(role) == crate::ingest::SlotState::Live {
+        if ingest.state(watch) == crate::ingest::SlotState::Live {
             live = true;
             break;
         }

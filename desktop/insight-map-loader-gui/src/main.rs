@@ -666,6 +666,19 @@ impl App {
                 ui.colored_label(col, txt);
                 ui.separator();
             }
+            // A puck streaming valid MPT1 that no config entry claims. Shown
+            // rather than dropped: this is exactly what an unprovisioned or
+            // wrongly-configured puck looks like, and silence would send
+            // someone hunting a network fault that is not there.
+            if !v.unknown_sources.is_empty() {
+                let list = v.unknown_sources.iter()
+                    .map(|s| s.to_string()).collect::<Vec<_>>().join(", ");
+                ui.colored_label(
+                    Color32::YELLOW,
+                    format!("⚠ unclaimed puck id(s) {list} — add to insight-map-loader.json"),
+                );
+                ui.separator();
+            }
             ui.label(format!("out {} pkts → {}", v.emitted, self.cfg.out));
             ui.separator();
             ui.label(format!("{} aligned transforms", v.n_transforms));

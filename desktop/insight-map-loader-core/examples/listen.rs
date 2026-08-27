@@ -49,11 +49,14 @@ fn main() -> std::io::Result<()> {
                     })
                     .unwrap_or_default(),
             };
-            // Only mention slots we have ever heard from, so an unused slot does
-            // not look like a fault.
-            if state != SlotState::Absent || device == Device::Waist {
-                line.push_str(&format!("  {}={}", device.label(), tag));
-            }
+            // ingest.all() now enumerates only sources actually heard from, so
+            // there is no unused slot to suppress. Show the source byte and, if
+            // it happens to name a known role, that too -- this example watches
+            // the WIRE, and the wire carries puck ids, not roles.
+            let name = Device::from_u8(device)
+                .map(|d| d.label().to_string())
+                .unwrap_or_else(|| format!("src{device}"));
+            line.push_str(&format!("  {name}={tag}"));
         }
         if now.malformed > 0 {
             line.push_str(&format!("  malformed={}", now.malformed));

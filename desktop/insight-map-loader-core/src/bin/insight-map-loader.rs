@@ -19,7 +19,6 @@ use std::time::{Duration, SystemTime};
 
 use insight_map_loader_core::bridge::{self, PosePair};
 use insight_map_loader_core::ingest::{Ingest, SlotState};
-use insight_map_loader_core::mpt1::Device;
 use insight_map_loader_core::config::Config;
 use insight_map_loader_core::fleet;
 
@@ -177,8 +176,10 @@ fn up(cfg: &Config) {
             println!("adb connect failed");
             continue;
         }
-        match fleet::configure_tracker(&p.ip, &cfg.host, port, p.device) {
-            Ok(()) => println!("tracker configured (device={}) and launched", p.device),
+        // Write the puck's SOURCE byte: its id once provisioned, else its role.
+        let src = p.id.unwrap_or(p.device);
+        match fleet::configure_tracker(&p.ip, &cfg.host, port, src) {
+            Ok(()) => println!("tracker configured (src={src}, role={}) and launched", p.device),
             Err(e) => println!("configure failed: {e}"),
         }
     }
@@ -198,12 +199,14 @@ fn bridge_cmd(cfg: &Config) -> i32 {
 
     let mut out = BTreeMap::new();
     for p in &cfg.pucks {
-        let Some(device) = Device::from_u8(p.device) else { continue };
+        // Bridging pairs this puck's OWN stream with its own dumpsys pose, so
+        // it keys on the source byte, not the role it publishes under.
+        let src = p.id.unwrap_or(p.device);
         print!("{:15} pairing dumpsys with MPT1 (hold the puck STILL)... ", p.ip);
         let mut pairs = Vec::new();
         for _ in 0..10 {
             let Some(world) = fleet::dumpsys_pose(&p.ip) else { continue };
-            let Some(s) = ingest.sample(device) else { continue };
+            let Some(s) = ingest.sample(src) else { continue };
             // The dumpsys read takes ~300 ms; only pair it with an MPT1 sample
             // that is current, so the two describe the same instant.
             if !s.packet.valid || s.age() > Duration::from_millis(120) {

@@ -134,7 +134,18 @@ impl Default for Pose {
 /// A decoded MPT1 datagram.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Packet {
-    pub device: Device,
+    /// The byte at offset 4, exactly as the sender stamped it.
+    ///
+    /// This is NOT necessarily a role. On the wire from a puck it is that
+    /// puck's identity; on the wire to the SteamVR driver it is the role. The
+    /// host sits between the two namespaces and translates, which is what lets
+    /// a role be reassigned host-side instead of pushed to the device.
+    ///
+    /// Deliberately a raw u8 and not a `Device`: rejecting an unknown value at
+    /// decode time would make an unprovisioned puck indistinguishable from a
+    /// malformed packet, and "silently dropped" is the failure shape this
+    /// project keeps paying for.
+    pub src: u8,
     /// False means the tracker is alive but not tracking. Such a packet still
     /// arrives — silence means the tracker is *gone*, which is a different
     /// problem — but its pose must not be consumed.
@@ -155,8 +166,6 @@ pub enum DecodeError {
     WrongLength(usize),
     /// Right size, wrong magic — a different protocol, or a byte-order mistake.
     BadMagic(u32),
-    /// A device id outside the three slots.
-    BadDevice(u8),
 }
 
 impl std::fmt::Display for DecodeError {
@@ -164,7 +173,6 @@ impl std::fmt::Display for DecodeError {
         match self {
             DecodeError::WrongLength(n) => write!(f, "expected {PACKET_LEN} bytes, got {n}"),
             DecodeError::BadMagic(m) => write!(f, "bad magic 0x{m:08X}"),
-            DecodeError::BadDevice(d) => write!(f, "device id {d} outside 0..{}", MAX_DEVICES - 1),
         }
     }
 }
@@ -184,7 +192,7 @@ impl Packet {
         if magic != MAGIC {
             return Err(DecodeError::BadMagic(magic));
         }
-        let device = Device::from_u8(b[4]).ok_or(DecodeError::BadDevice(b[4]))?;
+        // No role validation here -- see Packet::src.
 
         let mut t = [0u8; 8];
         t.copy_from_slice(&b[8..16]);
@@ -193,7 +201,7 @@ impl Packet {
         let (qw, qx, qy, qz) = (f32_at(b, 28), f32_at(b, 32), f32_at(b, 36), f32_at(b, 40));
 
         Ok(Packet {
-            device,
+            src: b[4],
             valid: b[5] != 0,
             battery_pct: b[6],
             charging: b[7] & 1 != 0,
@@ -210,7 +218,7 @@ impl Packet {
     pub fn encode(&self) -> [u8; PACKET_LEN] {
         let mut b = [0u8; PACKET_LEN];
         b[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        b[4] = self.device as u8;
+        b[4] = self.src;
         b[5] = self.valid as u8;
         b[6] = self.battery_pct;
         b[7] = self.charging as u8;
@@ -242,7 +250,7 @@ mod tests {
 
     fn sample() -> Packet {
         Packet {
-            device: Device::LeftFoot,
+            src: Device::LeftFoot as u8,
             valid: true,
             battery_pct: 77,
             charging: true,
@@ -279,19 +287,16 @@ mod tests {
         b[0] ^= 0xFF;
         assert!(matches!(Packet::decode(&b), Err(DecodeError::BadMagic(_))));
 
-        // Expressed against MAX_DEVICES rather than a literal: role ids are
-        // append-only, so a hardcoded "invalid" id becomes valid the next time
-        // a role is added, and the test would then assert the opposite of what
-        // it means.
-        let bad = MAX_DEVICES as u8;
-        let mut b = sample().encode();
-        b[4] = bad;
-        assert_eq!(Packet::decode(&b), Err(DecodeError::BadDevice(bad)));
-
-        // ...and the last valid id must still decode.
-        let mut b = sample().encode();
-        b[4] = MAX_DEVICES as u8 - 1;
-        assert!(Packet::decode(&b).is_ok(), "the highest role id must be accepted");
+        // Any source byte decodes, INCLUDING one outside the role range: the
+        // byte is the sender's identity, not a role, and a puck whose id the
+        // host does not recognise must arrive and be reported rather than be
+        // dropped as malformed. Resolution to a role happens in config.
+        for id in [0u8, MAX_DEVICES as u8 - 1, MAX_DEVICES as u8, 200, 255] {
+            let mut b = sample().encode();
+            b[4] = id;
+            let p = Packet::decode(&b).expect("any source id must decode");
+            assert_eq!(p.src, id, "the source byte must survive the round trip");
+        }
     }
 
     #[test]

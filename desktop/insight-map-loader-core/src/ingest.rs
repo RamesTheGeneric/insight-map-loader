@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::mpt1::{Device, Packet, PACKET_LEN};
+use crate::mpt1::{Packet, PACKET_LEN};
 
 /// A packet plus when it landed here.
 #[derive(Debug, Clone, Copy)]
@@ -56,7 +56,10 @@ pub struct Stats {
 }
 
 struct Shared {
-    slots: Mutex<BTreeMap<Device, Sample>>,
+    /// Keyed by the SOURCE byte the sender stamped, not by role. Resolution
+    /// to a role is the host's job and happens downstream, which is what lets
+    /// a role be reassigned without touching the puck.
+    slots: Mutex<BTreeMap<u8, Sample>>,
     received: AtomicU64,
     malformed: AtomicU64,
 }
@@ -98,7 +101,7 @@ impl Ingest {
                         worker.received.fetch_add(1, Ordering::Relaxed);
                         let sample = Sample { packet, arrived: Instant::now() };
                         if let Ok(mut slots) = worker.slots.lock() {
-                            slots.insert(packet.device, sample);
+                            slots.insert(packet.src, sample);
                         }
                     }
                     Err(_) => {
@@ -112,12 +115,12 @@ impl Ingest {
     }
 
     /// Newest sample for a slot, regardless of whether it is usable.
-    pub fn sample(&self, device: Device) -> Option<Sample> {
-        self.shared.slots.lock().ok()?.get(&device).copied()
+    pub fn sample(&self, src: u8) -> Option<Sample> {
+        self.shared.slots.lock().ok()?.get(&src).copied()
     }
 
-    pub fn state(&self, device: Device) -> SlotState {
-        match self.sample(device) {
+    pub fn state(&self, src: u8) -> SlotState {
+        match self.sample(src) {
             None => SlotState::Absent,
             Some(s) if s.age() > self.stale_after => SlotState::Stale,
             Some(s) if !s.packet.valid => SlotState::NotTracking,
@@ -135,12 +138,17 @@ impl Ingest {
             .collect()
     }
 
-    /// Every slot heard from, with its current verdict — for status display.
-    pub fn all(&self) -> Vec<(Device, SlotState, Option<Sample>)> {
-        crate::mpt1::ALL_DEVICES
-            .into_iter()
-            .map(|d| (d, self.state(d), self.sample(d)))
-            .collect()
+    /// Every SOURCE heard from, with its verdict — for status display.
+    ///
+    /// Enumerates what actually arrived rather than the fixed role list, so a
+    /// puck whose id the host does not recognise still shows up. That is the
+    /// point: an unprovisioned or misconfigured puck should be visible as an
+    /// unknown source, not silently absent.
+    pub fn all(&self) -> Vec<(u8, SlotState, Option<Sample>)> {
+        let Ok(slots) = self.shared.slots.lock() else { return Vec::new() };
+        let srcs: Vec<u8> = slots.keys().copied().collect();
+        drop(slots);
+        srcs.into_iter().map(|s| (s, self.state(s), self.sample(s))).collect()
     }
 
     pub fn stats(&self) -> Stats {
@@ -154,11 +162,11 @@ impl Ingest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mpt1::Pose;
+    use crate::mpt1::{Device, Pose};
 
     fn packet(device: Device, valid: bool) -> Packet {
         Packet {
-            device,
+            src: device as u8,
             valid,
             battery_pct: 0,
             charging: false,
@@ -176,7 +184,7 @@ mod tests {
 
     fn wait_for(ingest: &Ingest, device: Device, want: SlotState) -> bool {
         for _ in 0..100 {
-            if ingest.state(device) == want {
+            if ingest.state(device as u8) == want {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -187,7 +195,7 @@ mod tests {
     #[test]
     fn absent_until_something_arrives() {
         let ingest = Ingest::bind("127.0.0.1:0", Duration::from_millis(200)).unwrap();
-        assert_eq!(ingest.state(Device::Waist), SlotState::Absent);
+        assert_eq!(ingest.state(Device::Waist as u8), SlotState::Absent);
         assert!(ingest.live().is_empty());
     }
 

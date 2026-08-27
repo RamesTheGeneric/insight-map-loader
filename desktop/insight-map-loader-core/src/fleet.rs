@@ -378,9 +378,16 @@ pub fn provision_autostart(ip: &str) -> std::io::Result<bool> {
 /// Point the tracker's MPT1 stream at `host:port` as device `device`, with the
 /// controller slots off (each puck owns exactly one slot). The config file is
 /// read once at app startup, so this restarts the app.
-pub fn configure_tracker(ip: &str, host: &str, port: u16, device: u8) -> std::io::Result<()> {
+/// Write the puck's config and (re)launch its tracker.
+///
+/// `src` is the byte the puck will stamp into every packet. The on-device key
+/// is still called `device=` -- the app stamps whatever it is given and does not
+/// interpret it, so renaming the key would break every already-provisioned puck
+/// for no gain. What changed is the MEANING: it is the puck's identity, and the
+/// host maps identity to role. See config::source_to_role.
+pub fn configure_tracker(ip: &str, host: &str, port: u16, src: u8) -> std::io::Result<()> {
     let dir = format!("/sdcard/Android/data/{TRACKER_PKG}/files");
-    let cfg = format!("host={host}\\nport={port}\\ndevice={device}\\ncontrollers=0\\n");
+    let cfg = format!("host={host}\\nport={port}\\ndevice={src}\\ncontrollers=0\\n");
     shell(ip, &format!("mkdir -p {dir}"))?;
     shell(ip, &format!("printf '{cfg}' > {dir}/config.txt"))?;
     stop_tracker(ip)?;
