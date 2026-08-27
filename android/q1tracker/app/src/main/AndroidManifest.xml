@@ -12,7 +12,7 @@
          it and prefers the house network otherwise. -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- Start the tracker on boot without root. The rooted path
-         (tools/quest_boot_tracker.sh as a Magisk service) is better where it is
+         (a Magisk boot service) is better where it is
          available; this is for headsets where it is not, such as the Quest 1
          with its locked bootloader. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -24,7 +24,7 @@
          not granted by installing; it needs a one-time
              adb shell appops set com.mapperlocalizer.questtracker \
                  SYSTEM_ALERT_WINDOW allow
-         which tools/quest_autostart_setup.sh does along with the other knobs. -->
+         which `insight-map-loader provision` does along with the other knobs. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Optional MPT1-over-Bluetooth transport (bt=1 in config.txt). The legacy
          BLUETOOTH/BLUETOOTH_ADMIN pair covers API<=30; CONNECT is the API 31+

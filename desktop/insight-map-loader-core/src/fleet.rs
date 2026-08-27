@@ -255,7 +255,7 @@ fn floats_after(s: &str, tag: &str, n: usize) -> Option<Vec<f32>> {
 /// The whole loop runs in ONE on-device shell so it finishes and restores the
 /// original colour even if adb drops mid-blink, and a lock file makes an
 /// overlapping blink inherit the original saved colour instead of
-/// "restoring" the first blink's off-phase. (Port of tools/q1blink.sh.)
+/// "restoring" the first blink's off-phase. (Port of the identify command.)
 ///
 /// Blocks for ~`secs` seconds — call it from a worker thread.
 pub fn blink(ip: &str, r: u8, g: u8, b: u8, secs: u32) -> std::io::Result<()> {

@@ -181,7 +181,7 @@ The file is the **last write, not the live map** — see the caveat below.
 | decode is correct | 3D render recognised by the operator as the actual room |
 | decode matches the service | same root uuid, node set and point counts as live `dumpsys` |
 | pairing is exact | 49,688 index-aligned (point, descriptor) rows from `.108` |
-| alignment pipeline works | identity recovered on 12/15 node pairs, 0.33–1.79° / 6–18 cm, **0 wrong transforms** |
+| alignment pipeline | exact on synthetic ground truth; mixed on real maps (see README caveat) |
 | colocation is real | two pucks held together: **3.3 cm horizontal median**, identity transform, 8 samples |
 | creation works from nothing | wiped mapdb → 574 points, 5,303 paired rows, anchor flags all true |
 

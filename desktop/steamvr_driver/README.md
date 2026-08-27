@@ -94,12 +94,12 @@ The producer sends one `MapperPosePacket` per tracker per update to UDP
 world frame** (y-up, metres, -z forward): the map→universe SE(3) alignment is
 applied upstream, not in the driver.
 
-For bring-up on the Mac, `tools/hip_filter_live.py --mpt1` emits the MPT1 packet
+For bring-up on the Mac, `the host service (filtering lives there now) --mpt1` emits the MPT1 packet
 directly (velocity from the ESKF state, angular velocity from the bias-corrected
 gyro rotated to world). Point it at the PC:
 
 ```bash
-python3 tools/hip_filter_live.py --cam-imu cam_imu_hip.json \
+python3 the host service (filtering lives there now) --cam-imu cam_imu_hip.json \
     --mpt1 --device 0 --out <PC-IP>:5180
 ```
 

@@ -21,10 +21,10 @@
  *
  * Config is read from <externalFilesDir>/config.txt so the target can change
  * without a rebuild:
- *     host=192.168.1.113
+ *     host=<your PC's LAN IP>
  *     port=5180
  *     device=0
- *     mirror=192.168.1.138:5181
+ *     mirror=<host>:5181
  */
 #include <android/log.h>
 #include <android_native_app_glue.h>
@@ -72,7 +72,10 @@ extern "C" {
 namespace {
 
 struct Config {
-    std::string host = "192.168.1.113";
+    // No default worth guessing: the host address is site-specific and a
+    // stale one fails as silent "tracker up, nothing arriving". Empty means
+    // "not configured", which start-up reports as an error instead.
+    std::string host;
     int port = 5180;
     int device = 0;              // MPT1 device id (0 waist / 1 left / 2 right)
     std::string mirrorHost;
@@ -144,6 +147,12 @@ void loadConfig(const char *dir)
     }
     fclose(f);
     if (g_cfg.camHost.empty()) g_cfg.camHost = g_cfg.host;
+    // Say so loudly. An unset host used to fall back to a baked-in address,
+    // which fails as "tracker running, nothing arriving at the host" -- the
+    // most expensive failure shape this project has, because every indicator
+    // on the puck looks correct.
+    if (g_cfg.host.empty())
+        LOGE("config: NO host= set in the config file; nothing will be sent");
     LOGI("config: %s:%d device=%d mirror=%s:%d", g_cfg.host.c_str(), g_cfg.port,
          g_cfg.device, g_cfg.mirrorHost.c_str(), g_cfg.mirrorPort);
     if (g_cfg.camEnable)

@@ -438,7 +438,7 @@ against.
 ## Why this changes the plan
 
 The earlier conclusion in
-[multi-device-alignment.md](multi-device-alignment.md) was that a shared map is
+[insight-map-lifecycle.md](insight-map-lifecycle.md) was that a shared map is
 load-bearing and we would have to build it. We do not. Insight hosts the map,
 relocalizes into it, exposes anchor poses, and ships an API whose entire purpose
 is moving maps and anchors between devices. The job is plumbing, not SLAM.
@@ -480,7 +480,7 @@ What is left, now that the colocation API is closed as a source of shared map
 data:
 
 4. **Build the shared universe ourselves.** The camera + IMU pipeline in this
-   repo is the actual path forward -- see [multi-device-alignment.md](multi-device-alignment.md).
+   repo is the actual path forward -- see [insight-map-lifecycle.md](insight-map-lifecycle.md).
 5. **The puck viewpoint problem.** Insight relocalizing well from a head is not
    evidence it will relocalize from an ankle, and is now moot for Insight's own
    map specifically, but remains relevant for whatever SLAM this project ends
@@ -805,7 +805,7 @@ Insight stays useful as a **reference and a fallback**: it still relocalizes
 into its own persistent map across reboots (verified again -- same uuid after a
 reboot and hours of darkness), so per-puck 6DoF is available for free even while
 our own cross-puck alignment is being built. See
-[multi-device-alignment.md](multi-device-alignment.md).
+[insight-map-lifecycle.md](insight-map-lifecycle.md).
 
 ---
 

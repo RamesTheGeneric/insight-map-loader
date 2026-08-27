@@ -46,7 +46,7 @@ On two Quest 1 pucks, held physically together:
 | colocation error | **3.3 cm horizontal median** (8 samples, identity transform, nothing host-side in the path) |
 | previous best, with a solved transform | 9.6 cm |
 | map decode | verified against live `dumpsys`: same root uuid, node set and point counts |
-| alignment pipeline (fallback path) | identity recovered on 12/15 node pairs at 0.33–1.79° / 6–18 cm, **0 wrong transforms** |
+| alignment pipeline (fallback path) | recovers identity exactly on synthetic ground truth (0.000°, ~2e-16 residual). On real maps it is mixed — see the caveat below |
 
 The 3.3 cm figure is the honest one: it is the only measurement with real ground
 truth, because two co-located pucks cannot lie to each other.
@@ -92,6 +92,17 @@ and **[CONTRIBUTING.md](CONTRIBUTING.md)** for what is useful to send.
   and needs a still moment to re-solve.
 - **Same hardware only.** The map embeds the originating device's camera
   calibration. Proven between two Quest 1s, untested across models.
+- **The map-to-map alignment fallback is not trustworthy on real maps.** Its
+  solver is exact against synthetic ground truth (0.000°, ~2e-16 residual) and
+  a map matched against itself returns exact identity. But on the two real maps
+  available at the time of writing, the node-pair self-test recovered identity
+  on 7 of 15 pairs and got 2 wrong. An earlier record of 12/15 with none wrong
+  could not be reproduced. Colocation does not depend on this path — the pucks
+  share a map, so the transform is identity and the matcher is only used for
+  inspection and drift measurement — but do not build on it without re-checking.
+- **Insight prunes its own map.** Point counts are not monotonic: two pucks were
+  observed dropping from 1269 and 1269 points to 835 and 860 without leaving the
+  room. Two pucks therefore diverge in content even with no new territory.
 - Quest 1 is EOL and the headsets here are kept off Meta's servers deliberately;
   an OTA would change the tracking library this all depends on.
 

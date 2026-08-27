@@ -46,3 +46,11 @@ datasets/
 vndk*/
 
 *.log
+
+# Measurement outputs. resid.json carries full puck trajectories, i.e. a
+# record of walking around the operator's home -- same reason *.mapdata is
+# excluded, and it is written into the repo root by default.
+resid.json
+align*.json
+*.pgm
+captures/

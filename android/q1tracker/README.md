@@ -36,10 +36,10 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 # target: the SteamVR PC running the mapper driver, plus an optional mirror to
 # the dashboard so the live 3D view shows the Quest too
 cat > /tmp/config.txt <<CFG
-host=192.168.1.113
+host=<your PC's LAN IP>
 port=5180
 device=0
-mirror=192.168.1.138:5181
+mirror=<host>:5181
 CFG
 adb push /tmp/config.txt \
   /sdcard/Android/data/com.mapperlocalizer.questtracker/files/config.txt
@@ -57,7 +57,7 @@ since both ends draw), add to `config.txt`:
 
 ```
 cam=1
-cam_host=192.168.1.138     # host running tools/posed_frame_receiver.py
+cam_host=<host>            # only used by the camera track, not shipped here
 cam_port=5171              # MPF1 posed-frame TCP (distinct from MPT1's 5180)
 cam_mjpeg=1
 cam_w=640
@@ -176,7 +176,7 @@ the PC's Bluetooth settings, find the **outgoing** COM port it creates, and run
 the bridge:
 
 ```bash
-python tools/mpt1_bt_bridge.py --port COM7
+python a Bluetooth bridge (not shipped; the tracker streams over UDP) --port COM7
 ```
 
 The bridge forwards each 68-byte frame to `127.0.0.1:5180`, which is where the

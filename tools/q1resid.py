@@ -23,7 +23,7 @@ autocorrelation 0.60), and a radius fit explaining 7% of the variance. Fitting
 the transform uses the direction and is not under-constrained.
 
     ./q1resid.py --seconds 120
-    ./q1resid.py 192.168.0.108 192.168.0.132 --seconds 120
+    ./q1resid.py 192.168.1.10 192.168.1.11 --seconds 120
 
 Hold ONE fixed relative orientation throughout, and cover a real spread of
 positions -- the yaw term needs a lever arm to be visible at all.
@@ -39,6 +39,10 @@ import sys
 import time
 
 import numpy as np
+
+# Max movement between consecutive reads for a sample to count as stationary.
+# Below this the 75 ms A->B sampling gap contributes under a centimetre.
+STILL_M = 0.02
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "insightmap"))
 from matchmap import yaw_kabsch, yaw_deg  # noqa: E402
@@ -87,23 +91,38 @@ def main():
     a_ip, b_ip = ips[0], ips[1]
 
     print(f"hold {a_ip} and {b_ip} together in ONE fixed relative orientation.")
-    print(f"walk the room for {args.seconds:.0f}s, near AND far from where the map")
-    print("was made, and turn as you go -- the fit needs both position and heading spread.\n")
+    print(f"STAND STILL at a spot, let it sample, then MOVE to a new spot and stand")
+    print(f"still again. Ten-odd spots over {args.seconds:.0f}s, spread near AND far from")
+    print("where the map was made. Samples are only taken while both pucks are still,")
+    print("because the two are read 75 ms apart and walking smears that into the result.\n")
 
+    # The two pucks are read SEQUENTIALLY over adb, ~75 ms apart. While moving,
+    # that gap alone contributes 4-8 cm at walking pace -- comparable to the
+    # whole effect being measured, and it silently inflates both the separation
+    # and the residual. So only samples taken while BOTH pucks are stationary
+    # are kept: the yaw term needs spread in POSITION, not continuous motion.
     A, B = [], []
+    prev_a = prev_b = None
     t_end = time.time() + args.seconds
     while time.time() < t_end:
         a, b = pose(a_ip), pose(b_ip)
         if a is None or b is None:
             print("  (a puck is not at 6DoF)")
-            time.sleep(0.5)
+            time.sleep(0.3)
             continue
-        A.append(a)
-        B.append(b)
-        r = math.hypot(a[0], a[2])
-        sep = math.dist(a, b)
-        print(f"  n={len(A):3d}  r={r:5.2f} m  raw sep={sep*100:5.1f} cm")
-        time.sleep(0.4)
+        if prev_a is not None:
+            moved = max(math.dist(a, prev_a), math.dist(b, prev_b))
+            if moved > STILL_M:
+                print(f"    moving ({moved*100:.0f} cm) — hold still to sample")
+                prev_a, prev_b = a, b
+                time.sleep(0.3)
+                continue
+            A.append(a)
+            B.append(b)
+            r = math.hypot(a[0], a[2])
+            print(f"  n={len(A):3d}  r={r:5.2f} m  sep={math.dist(a, b)*100:5.1f} cm  (still)")
+        prev_a, prev_b = a, b
+        time.sleep(0.3)
 
     if len(A) < 20:
         sys.exit("too few samples to fit a transform")
@@ -130,11 +149,17 @@ def main():
           f"p90 {np.percentile(err, 90)*100:.1f} cm")
     print(f"                 -> tracking noise + 1 cm dumpsys quantisation. The floor.")
 
-    # A fit is only worth quoting if it explained the data. Reporting a yaw from
-    # a fit that did not is exactly how the earlier radius regression misled.
-    raw = np.linalg.norm(A - B, axis=1)
-    explained = 1.0 - (np.var(err) / np.var(raw)) if np.var(raw) > 1e-12 else 0.0
-    print(f"\n  fit explains {100*explained:.0f}% of the variation in separation")
+    # Quote the uncertainty, not a goodness-of-fit percentage: yaw is inferred
+    # from a lever arm, so the noise floor divided by the mean radius (and by
+    # sqrt(n)) IS the precision, and it is the number that says whether a yaw
+    # this small is distinguishable from zero at all.
+    lever = float(np.mean(radii))
+    sigma = float(np.median(err))
+    yaw_sd = math.degrees(math.atan(sigma / lever)) / math.sqrt(len(A)) if lever > 0.1 else float("nan")
+    print(f"\n  yaw precision  +/- {yaw_sd:.3f} deg "
+          f"(noise {sigma*100:.1f} cm over a {lever:.2f} m mean lever arm, n={len(A)})")
+    if abs(yaw) < 2 * yaw_sd:
+        print(f"  NOTE: {abs(yaw):.3f} deg is within 2 sigma of zero — not resolved.")
     if radii.max() - radii.min() < 1.5:
         print("  NOT ENOUGH RADIUS SPREAD — walk further out and re-run; the yaw")
         print("  term has no lever arm here and the number above is not meaningful.")

@@ -21,7 +21,7 @@ needed -- `ICameraProvider::getCalibrationData` exists but is redundant.
 /persist/calibration/online/<id>                  runtime-refined, rewritten live
 ```
 
-`tools/pull_calibration.sh` fetches them. They carry the headset's serial number
+`adb pull /persist/calibration` fetches them. They carry the headset's serial number
 and are per device, so they are deliberately not checked in.
 
 ### Cameras
@@ -471,7 +471,7 @@ fusion is sensitive to camera-IMU timing.
 **The fix needs no new device work.** Every frameset already carries the
 sensor's frame counter, and that counter ticks at **exactly 60.00 Hz**
 (measured 16.6665 ms/tick over 1800 ticks, on both pucks independently). So the
-counter is itself a clean hardware time base. `tools/q1retime.py` fits
+counter is itself a clean hardware time base. `a retiming pass (not shipped)` fits
 
 ```
 t = a * counter + b        (least squares, outliers rejected)
