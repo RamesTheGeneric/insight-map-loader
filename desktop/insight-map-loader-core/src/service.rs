@@ -82,6 +82,24 @@ pub enum BridgeState {
     Suspect,
 }
 
+/// Does this puck need its bridge re-solved?
+///
+/// Both inputs matter and they are set by different paths, which is how they
+/// came to disagree: the drift path counts failed checks and flips the state at
+/// two, while a frame jump flips the state IMMEDIATELY and leaves the counter
+/// at zero -- deliberately, because a jump is unambiguous and waiting out a
+/// count would keep emitting known-wrong poses.
+///
+/// Gating on the counter alone therefore deadlocked: a jumped puck sat in
+/// Suspect forever, because the consistency check that increments the counter
+/// only runs while the state is still Ok. Observed live -- the service
+/// announced "re-bridging when still", the puck was provably still, and it
+/// never re-bridged.
+pub fn needs_resolve(state: BridgeState, suspect: u32) -> bool {
+    matches!(state, BridgeState::Missing | BridgeState::Suspect | BridgeState::WaitingStill)
+        || suspect >= 2
+}
+
 #[derive(Clone, Default)]
 pub struct View {
     pub live: Vec<(Device, [f32; 3])>,
@@ -717,7 +735,7 @@ fn spawn_bridge_watchdog(
                     if force {
                         w.suspect = 2;
                     }
-                    let needs = w.state == BridgeState::Missing || w.suspect >= 2;
+                    let needs = needs_resolve(w.state, w.suspect);
 
                     if needs {
                         if !still {
@@ -895,10 +913,30 @@ fn save_bridges(path: &str, bridges: &BTreeMap<String, config::BridgeEntry>) {
 
 #[cfg(test)]
 mod tests {
-    use super::DriftDetector;
+    use super::{needs_resolve, BridgeState, DriftDetector};
 
     /// Carrying the pucks a metre apart: big change, fully explained. The
     /// user's exact false-positive case.
+    #[test]
+    fn a_jumped_bridge_re_solves_even_with_a_zero_counter() {
+        // The frame-jump path sets the STATE and leaves the counter at zero on
+        // purpose. Gating on the counter alone stranded the puck in Suspect
+        // forever, which is exactly what happened on the fleet.
+        assert!(needs_resolve(BridgeState::Suspect, 0));
+        assert!(needs_resolve(BridgeState::Missing, 0));
+        assert!(needs_resolve(BridgeState::WaitingStill, 0));
+    }
+
+    #[test]
+    fn a_healthy_bridge_is_left_alone() {
+        assert!(!needs_resolve(BridgeState::Ok, 0));
+        assert!(!needs_resolve(BridgeState::Ok, 1));
+        // ...until the drift path has failed twice.
+        assert!(needs_resolve(BridgeState::Ok, 2));
+        // Solving must not re-enter itself.
+        assert!(!needs_resolve(BridgeState::Solving, 0));
+    }
+
     #[test]
     fn carried_apart_does_not_flag() {
         let mut d = DriftDetector::new();

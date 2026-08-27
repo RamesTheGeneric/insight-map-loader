@@ -47,7 +47,7 @@ fn main() {
         "bridge" => std::process::exit(bridge_cmd(&cfg)),
         "run" => std::process::exit(run(&cfg)),
         "identify" => identify(&cfg),
-        "provision" => provision(&cfg),
+        "provision" => provision(&cfg, &cfg_path),
         "mapdb" => mapdb_cmd(&cfg),
         _ => {
             eprintln!("usage: insight-map-loader [status|up|bridge|run|identify|provision|mapdb] [--config insight-map-loader.json]");
@@ -95,7 +95,51 @@ fn mapdb_cmd(cfg: &Config) {
     }
 }
 
-fn provision(cfg: &Config) {
+/// Give every puck a stable id, then grant boot-start.
+///
+/// The id is what makes a role reassignable host-side: the puck stamps it into
+/// every packet and the host maps it to a role, so changing a role afterwards
+/// is a config edit rather than a push plus a tracker restart -- and a tracker
+/// restart moves the OpenXR LOCAL frame, which would invalidate that puck's
+/// bridge for what is only a relabel.
+///
+/// Assigning one costs exactly one restart, here, once per puck ever. A puck
+/// that already has an id keeps it, so this is safe to re-run.
+fn provision(cfg: &Config, cfg_path: &str) {
+    let port: u16 = cfg.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(5180);
+    let mut roster = cfg.pucks.clone();
+    let need: Vec<String> =
+        roster.iter().filter(|p| p.id.is_none()).map(|p| p.ip.clone()).collect();
+
+    if need.is_empty() {
+        println!("every puck already has a stable id\n");
+    } else {
+        println!("assigning stable ids to {} puck(s) — one tracker restart each\n", need.len());
+        for ip in &need {
+            let Some(id) = insight_map_loader_core::config::next_free_id(&roster) else {
+                println!("  {ip:15} no free id left (all 100..255 are taken)");
+                continue;
+            };
+            // Config first: if the push succeeds but the write fails, the puck
+            // streams an id the host does not know and vanishes from the output.
+            // The other order merely leaves it on the legacy path, which works.
+            if let Err(e) = insight_map_loader_core::config::set_puck_id(cfg_path, ip, id) {
+                println!("  {ip:15} could not record id {id}: {e}");
+                continue;
+            }
+            match fleet::configure_tracker(ip, &cfg.host, port, id) {
+                Ok(()) => {
+                    println!("  {ip:15} id {id} assigned; role is now host-side only");
+                    if let Some(p) = roster.iter_mut().find(|p| &p.ip == ip) {
+                        p.id = Some(id);
+                    }
+                }
+                Err(e) => println!("  {ip:15} id {id} recorded but the puck push failed: {e}"),
+            }
+        }
+        println!();
+    }
+
     println!("granting boot-start to each puck (~45 s each for the appop to flush)\n");
     let handles: Vec<_> = cfg
         .pucks

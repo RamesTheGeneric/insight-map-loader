@@ -97,6 +97,26 @@ impl Config {
     }
 }
 
+/// The first id no puck is using, for handing to a newly provisioned one.
+///
+/// Starts at 100 deliberately. Ids and roles share one byte on the wire, and a
+/// puck with no id is keyed by its ROLE (0..MAX_DEVICES-1) -- so allocating a
+/// low id would let a provisioned puck collide with a legacy one still keyed by
+/// the same number, and the ingest would silently keep whichever packet landed
+/// last. Starting clear of the role range makes that impossible by construction
+/// rather than by validation.
+pub const FIRST_PUCK_ID: u8 = 100;
+
+pub fn next_free_id(pucks: &[PuckCfg]) -> Option<u8> {
+    let used: std::collections::BTreeSet<u8> = pucks.iter().filter_map(|p| p.id).collect();
+    (FIRST_PUCK_ID..=u8::MAX).find(|c| !used.contains(c))
+}
+
+/// Surgically set one puck's stable `id`. Same atomic write as `set_puck_device`.
+pub fn set_puck_id(path: &str, ip: &str, id: u8) -> Result<(), String> {
+    edit_puck(path, ip, "id", serde_json::Value::from(id))
+}
+
 /// Surgically set one puck's `device` (its SteamVR role) in the config file.
 ///
 /// Deliberately edits the JSON as a `Value` rather than re-serializing a
@@ -105,6 +125,32 @@ impl Config {
 /// (tmp + fsync + rename) so a watcher never sees a partial file, matching the
 /// pattern used for bridge.json.
 pub fn set_puck_device(path: &str, ip: &str, device: u8) -> Result<(), String> {
+    // Refuse a duplicate ROLE here: this is the write path, and letting one
+    // through produces a file Config::load then rejects on the next start.
+    {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let root: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+        if let Some(arr) = root.get("pucks").and_then(|p| p.as_array()) {
+            for p in arr {
+                let other_ip = p.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                let other_dev = p.get("device").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+                if other_ip != ip && other_dev == device as u64 {
+                    return Err(format!("device {device} is already assigned to {other_ip}"));
+                }
+            }
+        }
+    }
+    edit_puck(path, ip, "device", serde_json::Value::from(device))
+}
+
+/// Set one key on one puck's config entry, atomically.
+///
+/// Edits the JSON as a `Value` rather than re-serializing a `Config`: the struct
+/// does not model every key a human may have put there, and a round trip through
+/// it would drop them. tmp + fsync + rename so a watcher never sees a partial
+/// file, matching the pattern used for bridge.json.
+fn edit_puck(path: &str, ip: &str, key: &str, value: serde_json::Value) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let mut root: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
@@ -114,21 +160,11 @@ pub fn set_puck_device(path: &str, ip: &str, device: u8) -> Result<(), String> {
         .and_then(|p| p.as_array_mut())
         .ok_or_else(|| format!("{path}: no \"pucks\" array"))?;
 
-    // Refuse a duplicate here too: this is the write path, and letting it
-    // through would produce a file that Config::load then rejects on restart.
-    for p in pucks.iter() {
-        let other_ip = p.get("ip").and_then(|v| v.as_str()).unwrap_or("");
-        let other_dev = p.get("device").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
-        if other_ip != ip && other_dev == device as u64 {
-            return Err(format!("device {device} is already assigned to {other_ip}"));
-        }
-    }
-
     let entry = pucks
         .iter_mut()
         .find(|p| p.get("ip").and_then(|v| v.as_str()) == Some(ip))
         .ok_or_else(|| format!("{path}: no puck with ip {ip}"))?;
-    entry["device"] = serde_json::Value::from(device);
+    entry[key] = value;
 
     // One backup per process, taken before the first mutation -- enough to
     // recover a hand-maintained file from a bad edit without accumulating
@@ -183,6 +219,24 @@ mod source_tests {
         assert_eq!(before.get(&42), Some(&Device::Waist));
         assert_eq!(after.get(&42), Some(&Device::RightKnee));
         assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn allocated_ids_start_clear_of_the_role_range() {
+        // A low id would collide with a LEGACY puck keyed by that same number
+        // as its role, and the ingest would silently keep whichever packet
+        // arrived last. Starting at 100 rules that out by construction.
+        assert!(FIRST_PUCK_ID as usize >= crate::mpt1::MAX_DEVICES);
+        assert_eq!(next_free_id(&[]), Some(FIRST_PUCK_ID));
+    }
+
+    #[test]
+    fn allocation_skips_ids_already_in_use() {
+        let taken = vec![puck("a", 0, Some(100)), puck("b", 1, Some(101))];
+        assert_eq!(next_free_id(&taken), Some(102));
+        // A gap is reused rather than always climbing.
+        let gap = vec![puck("a", 0, Some(100)), puck("b", 1, Some(102))];
+        assert_eq!(next_free_id(&gap), Some(101));
     }
 
     #[test]
