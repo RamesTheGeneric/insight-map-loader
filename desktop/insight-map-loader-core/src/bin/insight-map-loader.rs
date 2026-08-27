@@ -272,6 +272,14 @@ fn run(cfg: &Config) -> i32 {
         for (d, p) in &v.live {
             line += &format!("  {}:({:+.2},{:+.2},{:+.2})", d.label(), p[0], p[1], p[2]);
         }
+        // A puck streaming valid MPT1 that no config entry claims. Without this
+        // it simply does not appear, and "my puck vanished" sends someone after
+        // a network fault that is not there -- the GUI says so, and so must this.
+        if !v.unknown_sources.is_empty() {
+            let list = v.unknown_sources.iter()
+                .map(|x| x.to_string()).collect::<Vec<_>>().join(", ");
+            line += &format!("  [UNCLAIMED id {list} — add it to the config]");
+        }
         for (d, st, _, _) in &v.slots {
             match st {
                 SlotState::NotTracking => line += &format!("  {}:NO-TRACK", d.label()),
