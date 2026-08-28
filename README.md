@@ -326,3 +326,4 @@ them, are read from your own headset and are never redistributed here.
 
 
 I vibecoded this entire thing incase you coulden't tell lol
+see, the only human part is that spelling error :3
