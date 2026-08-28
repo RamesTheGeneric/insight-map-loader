@@ -16,19 +16,6 @@ one headset to the others and feeds their poses to SteamVR as generic trackers.
 - [Daily use](#daily-use) · [Troubleshooting](#troubleshooting)
 - [Working on the code](#working-on-the-code) · [Contributing](#contributing) · [Honest limits](#honest-limits) · [Licence](#licence)
 
-## Measured
-
-On two Quest 1 pucks, held physically together:
-
-| | |
-|---|---|
-| colocation error | **3.3 cm horizontal median** (identity transform, nothing host-side in the path) |
-| previous best, with a solved transform | 9.6 cm |
-| map decode | verified against live `dumpsys`: same root uuid, node set and point counts |
-
-The 3.3 cm figure is the honest one: it is the only measurement with real ground truth,
-because two co-located pucks cannot lie to each other.
-
 ## Requirements
 
 - **Rooted Quest 1s.** Rooting is out of scope here; without root none of this works.
