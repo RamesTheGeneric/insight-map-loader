@@ -426,6 +426,18 @@ impl MapdbInfo {
 
 /// File count, total bytes and last-write time in ONE shell round trip.
 pub fn mapdb_info(ip: &str) -> Result<MapdbInfo, FleetError> {
+    // The mapdb is 700 system:system, so every query here needs root -- and
+    // root does NOT survive a reboot. Without this the commands below fail
+    // with "exit 1" and an output of "0" (wc counting nothing, stat hitting
+    // permission denied), which says nothing about the actual cause. Observed
+    // live as a map share aborting on "command failed on puck (exit 1): 0"
+    // after the pucks had been power-cycled.
+    if !ensure_root(ip) {
+        return Err(FleetError::Precondition(format!(
+            "{ip} is not adb root (root does not survive a reboot) — \
+             the map directory is unreadable without it"
+        )));
+    }
     let out = shell_checked(
         ip,
         &format!(
@@ -501,6 +513,7 @@ pub fn backup_mapdb(
     ip: &str,
     host_dir: &std::path::Path,
 ) -> Result<Option<(String, std::path::PathBuf)>, FleetError> {
+    // mapdb_info ensures root, which the copy below also needs.
     let info = mapdb_info(ip)?;
     if info.is_empty() {
         return Ok(None);

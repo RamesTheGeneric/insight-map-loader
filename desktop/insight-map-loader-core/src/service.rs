@@ -1016,6 +1016,32 @@ fn share_map_job(
         ));
     }
     let root = src_status.map_root.clone();
+
+    // Warn when the source is the ODD ONE OUT. Sharing from a puck whose map
+    // the rest of the fleet does not use overwrites an established shared map
+    // with a lone one -- legitimate when seeding a new space, and a disaster
+    // when the intended direction was the other way. Nearly happened here: a
+    // freshly set-up puck was picked as the source, which would have replaced
+    // the fleet's map on every other puck with that new puck's private one.
+    {
+        let mut agree = 0usize;
+        let mut differ = Vec::new();
+        for t in targets {
+            let st = fleet::status(t);
+            if st.map_persistent && !st.map_root.is_empty() {
+                if st.map_root == root { agree += 1; } else { differ.push(t.clone()); }
+            }
+        }
+        if agree == 0 && differ.len() > 1 {
+            ctx.progress(format!(
+                "NOTE: {} pucks already share a DIFFERENT map; sharing from {source} \
+                 replaces it on all of them. If {source} is the new puck, share the \
+                 other way instead.",
+                differ.len()
+            ));
+        }
+    }
+
     let before = fleet::mapdb_info(source).map_err(|e| e.to_string())?;
     if before.is_empty() {
         return Err(format!("{source}'s mapdb is empty despite a persistent context"));
