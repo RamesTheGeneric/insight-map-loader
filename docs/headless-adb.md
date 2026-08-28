@@ -327,6 +327,45 @@ fastboot reboot
 A `Power`-only boot lands in `msc` and key combos will not reach fastboot, so
 use `adb reboot bootloader`.
 
+### Patching a boot image with Magisk
+
+The kernel command line on these headsets contains **`skip_initramfs`**:
+
+```sh
+tr ' ' '\n' < /proc/cmdline | grep -E "initramfs|^root=|^dm="
+# skip_initramfs   root=/dev/dm-0   dm="system none ro,0 1 android-verity /dev/sda7"
+```
+
+That tells the kernel to ignore the boot ramdisk and mount system directly —
+and the ramdisk is where `magiskinit` lives. Magisk's answer is to hexpatch the
+kernel, `skip_initramfs` → `want_initramfs`, but `boot_patch.sh` only does that
+when told the device is legacy system-as-root. **It defaults to off**, so a
+bare invocation produces an image that boots perfectly with no Magisk in it:
+
+```sh
+adb root
+adb shell 'dd if=/dev/block/bootdevice/by-name/boot_b of=/data/local/tmp/stock.img bs=1M'
+adb shell 'cd /data/adb/magisk && LEGACYSAR=true KEEPVERITY=false \
+           KEEPFORCEENCRYPT=false sh ./boot_patch.sh /data/local/tmp/stock.img'
+```
+
+**Check for this line in the output — it is the whole difference:**
+
+```
+Patch @ 0x01DF95B8 [736B69705F696E697472616D667300] -> [77616E745F696E697472616D667300]
+                    s k i p _ i n i t r a m f s        w a n t _ i n i t r a m f s
+```
+
+No `Patch @` line means Magisk will be silently absent after the flash: the
+device boots, `adb root` still works, and nothing whatsoever indicates that the
+patch did not take. Then flash `new-boot.img` to the **inactive-of-slot-a**
+partition (`fastboot flash boot_b`) and confirm afterwards with
+`mount | grep " /sbin "` — a magisk tmpfs there is the proof.
+
+AVB1 signing is not an obstacle. These images report `AVB1_SIGNED` and there is
+no separate `vbmeta` partition, but an unlocked bootloader
+(`verifiedbootstate=orange`) boots the resigned image without complaint.
+
 ### After a Magisk install
 
 ```sh
