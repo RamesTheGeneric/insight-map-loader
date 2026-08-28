@@ -346,65 +346,6 @@ else:
 - **`adb push` into `/vision` needs `chcon u:object_r:vision_file:s0` afterwards**, or
   trackingservice silently cannot read the file.
 
-## Contributing
-
-**A report from other hardware is worth more than a feature.** The honest limits below
-exist because nobody has checked; each one someone checks is a real result. Include the
-headset build number (`getprop ro.build.version.incremental`), what
-`insight-map-loader status` printed, and the tracking level and map context line from
-`dumpsys tracking`.
-
-⚠️ **Never attach a `mapdb` or `.mapdata` file.** A persisted Insight map is a 3-D point
-cloud of the room it was made in — someone's home. Describe it, or send a screenshot of
-`visualize3d.py`. Also scrub serials, WiFi MACs and your `insight-map-loader.json` out of
-anything you paste.
-
-**The bar for a change.** This project has retracted claims before — memory-extraction
-results that beat a badly-chosen control, a "sparsity floor" that was an artefact:
-
-- **Use a matched control.** If you claim a result beats chance, make chance work as hard
-  as your result does.
-- **State what your check cannot see.** Internal-consistency checks mislead in both
-  directions; external ground truth is the one that counts.
-- **A refusal beats a confident wrong answer.** `align_stable()` returns `None` when its
-  seeds disagree, because a wrong transform is worse than none.
-
-Add a test if what you changed can be tested without a headset. If it can only be
-exercised on hardware, say so plainly and say what you ran it against — "untested on
-hardware" is fine; a claim you did not check is not.
-
-**Probably not wanted:** hand-applied offsets or manual calibration steps (a whole
-alignment subsystem was deleted for that reason), support for headsets nobody in the
-discussion owns, reformatting sweeps, and rooting instructions.
-
-**Never commit:** `*.mapdata` or any `mapdb`, `resid.json` / `align*.json` / `*.pgm`,
-device serials, WiFi MACs, LAN addresses, `insight-map-loader.json`, `bridge.json`, APKs,
-keystores, build output, or **anything pulled off a Quest**.
-
-If you are planning something large, read [FINDINGS.md](FINDINGS.md) first — it records
-what was tried and failed, which for a lot of the obvious ideas here is most of them.
-
-## Honest limits
-
-- **Verified on exactly two headsets, on one network, in one room.** Everything above is
-  reproducible here; none of it is reproducible elsewhere until someone else tries.
-- **The map is per-space.** A puck must be physically in the mapped room to relocalize
-  into it. Disconnected spaces need their own map.
-- **One calibration remains**: the tracker app reports an OpenXR LOCAL frame, so a
-  LOCAL→world bridge is solved per session. It goes stale on restarts and needs a still
-  moment to re-solve.
-- **Same hardware only.** The map embeds the originating device's camera calibration.
-  Proven between two Quest 1s, untested across models.
-- **Insight prunes its own map.** Point counts are not monotonic — two pucks were observed
-  dropping from 1269 points each to 835 and 860 without leaving the room — so two pucks
-  diverge in content even with no new territory.
-- **The map-to-map alignment fallback is not trustworthy on real maps.** Its solver is
-  exact against synthetic ground truth and a map matched against itself returns exact
-  identity, but the node-pair self-test currently recovers identity on only 7 of 15 pairs.
-  An earlier record of 12/15 could not be reproduced. Colocation does not depend on this
-  path; do not build on it without re-checking.
-- Quest 1 is EOL and these headsets are kept off Meta's servers deliberately; an OTA would
-  change the tracking library all of this depends on.
 
 ## Licence
 
@@ -414,3 +355,5 @@ GPL-3.0. See [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md) for the ven
 This project contains **no Meta code**. It interoperates with software already on a device
 you own, using interfaces recovered by observation. Device libraries, where a build needs
 them, are read from your own headset and are never redistributed here.
+
+I vibecoded this entire thing incase you coulden't tell lol
