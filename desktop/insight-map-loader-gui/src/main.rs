@@ -363,13 +363,23 @@ impl App {
             {
                 let cfg = self.cfg.clone();
                 let busy = Arc::clone(&self.busy);
+                // The LIVE roster, not the startup config: it carries each
+                // puck's assigned id, and a role reassigned since launch.
+                let roster = self.service.roster();
                 if !busy.swap(true, Ordering::Relaxed) {
                     std::thread::spawn(move || {
                         let port = cfg.listen.rsplit(':').next()
                             .and_then(|p| p.parse().ok()).unwrap_or(5180);
-                        for p in &cfg.pucks {
+                        for p in &roster {
                             fleet::connect(&p.ip).ok();
-                            fleet::configure_tracker(&p.ip, &cfg.host, port, p.device).ok();
+                            // Write the puck's SOURCE byte -- its id once
+                            // provisioned, its role only on the legacy path.
+                            // Writing the role here overwrites the id and the
+                            // puck then streams a source nothing claims, which
+                            // shows up as "unclaimed puck id(s)" and looks like
+                            // a config error rather than this button.
+                            let src = p.id.unwrap_or(p.device);
+                            fleet::configure_tracker(&p.ip, &cfg.host, port, src).ok();
                         }
                         busy.store(false, Ordering::Relaxed);
                     });
