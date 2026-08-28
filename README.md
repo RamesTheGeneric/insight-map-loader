@@ -356,4 +356,6 @@ This project contains **no Meta code**. It interoperates with software already o
 you own, using interfaces recovered by observation. Device libraries, where a build needs
 them, are read from your own headset and are never redistributed here.
 
+I vibecoded this whole thing in case the stench wasn't strong enough already :P
+
 I vibecoded this entire thing incase you coulden't tell lol
