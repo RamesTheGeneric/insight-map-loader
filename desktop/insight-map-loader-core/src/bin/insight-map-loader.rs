@@ -220,6 +220,16 @@ fn up(cfg: &Config) {
             println!("adb connect failed");
             continue;
         }
+        // A panel-free puck needs its synthetic-TE module before anything else:
+        // without it the cameras never deliver and the tracker streams nothing,
+        // which looks like a dead app rather than a missing kernel module.
+        if p.panel_free {
+            match fleet::ensure_te_module(&p.ip) {
+                Ok(true) => println!("synthetic TE loaded, HAL restarted; "),
+                Ok(false) => {}
+                Err(e) => println!("TE module: {e}; "),
+            }
+        }
         // Write the puck's SOURCE byte: its id once provisioned, else its role.
         let src = p.id.unwrap_or(p.device);
         match fleet::configure_tracker(&p.ip, &cfg.host, port, src) {

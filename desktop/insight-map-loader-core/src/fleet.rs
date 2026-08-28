@@ -378,6 +378,91 @@ pub fn provision_autostart(ip: &str) -> std::io::Result<bool> {
 /// Point the tracker's MPT1 stream at `host:port` as device `device`, with the
 /// controller slots off (each puck owns exactly one slot). The config file is
 /// read once at app startup, so this restarts the app.
+/// Where the synthetic-TE kernel module lives on a panel-free puck.
+///
+/// /data/local/tmp survives a reboot (verified), so the .ko only has to be
+/// placed once; what does NOT survive is the module being loaded.
+pub const TE_MODULE: &str = "/data/local/tmp/seperationanxiety.ko";
+
+/// The kernel the module is built against. It uses CONFIG_MODVERSIONS with no
+/// force-load, so every imported symbol's CRC must match: a different build is
+/// a different ABI, and insmod would fail confusingly rather than obviously.
+const TE_KERNEL_RELEASE: &str = "4.4.205-perf+";
+
+/// Load the synthetic-TE module on a panel-free puck, and restart the sensors
+/// HAL so it sees the pulse.
+///
+/// A puck with its display removed has no TE signal, so the camera frame
+/// timestamper rejects every frame -- `MontereyCameraProvider: Frame marked
+/// invalid by frame time stamper`, then `No Camera samples have been received`
+/// and 0DOF forever. Nothing about that says "missing kernel module", which is
+/// why this is worth doing automatically rather than diagnosing again.
+///
+/// ORDER MATTERS. The HAL establishes camera sync once, early; if it comes up
+/// with no TE every frame is discarded and restarting it later is the only
+/// cure. So the module goes in first, then the HAL is restarted.
+///
+/// Returns Ok(true) when it actually loaded the module (and therefore bounced
+/// the HAL), Ok(false) when it was already loaded and nothing was disturbed.
+pub fn ensure_te_module(ip: &str) -> Result<bool, FleetError> {
+    if !ensure_root(ip) {
+        return Err(FleetError::Precondition(format!(
+            "{ip} is not adb root; insmod needs it"
+        )));
+    }
+    // One round trip for both questions -- see the batching rule at the top.
+    let probe = shell_checked(
+        ip,
+        &format!("lsmod | grep -c seperationanxiety; uname -r; ls {TE_MODULE} >/dev/null 2>&1 && echo have || echo missing"),
+        30,
+    )?;
+    let mut lines = probe.lines().map(str::trim);
+    let loaded = lines.next().map(|s| s != "0").unwrap_or(false);
+    let release = lines.next().unwrap_or("").to_string();
+    let have_ko = lines.next() == Some("have");
+
+    if loaded {
+        return Ok(false);
+    }
+    if !have_ko {
+        return Err(FleetError::Precondition(format!(
+            "{ip} has no {TE_MODULE} -- push the module there first"
+        )));
+    }
+    if release != TE_KERNEL_RELEASE {
+        return Err(FleetError::Precondition(format!(
+            "{ip} runs kernel {release}, the module is built for {TE_KERNEL_RELEASE} -- \
+             loading it would be an ABI mismatch"
+        )));
+    }
+
+    shell_checked(ip, &format!("insmod {TE_MODULE}"), 30)?;
+
+    // The module refuses to drive a line a panel is already driving, so a
+    // non-zero IRQ count is the proof it took over rather than silently
+    // no-opping on a puck that still has its display.
+    let irq = shell_checked(ip, "grep 'msmgpio  10' /proc/interrupts", 20).unwrap_or_default();
+    let count: u64 = irq
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.trim_end_matches(':').parse().ok())
+        .unwrap_or(0);
+    if count == 0 {
+        return Err(FleetError::Precondition(format!(
+            "{ip} loaded the module but gpio10 shows no interrupts -- it did not take \
+             over the TE line (does this puck still have its panel?)"
+        )));
+    }
+
+    shell_checked(
+        ip,
+        "stop trackingservice; stop vendor.oculus.sensors-hal-1-0; sleep 4; \
+         start vendor.oculus.sensors-hal-1-0; sleep 5; start trackingservice",
+        90,
+    )?;
+    Ok(true)
+}
+
 /// Write the puck's config and (re)launch its tracker.
 ///
 /// `src` is the byte the puck will stamp into every packet. The on-device key

@@ -49,6 +49,16 @@ pub struct PuckCfg {
     /// edit that takes effect on the next packet.
     #[serde(default)]
     pub id: Option<u8>,
+    /// This puck's display has been removed.
+    ///
+    /// A panel-free puck has no TE signal, so the camera frame timestamper
+    /// rejects every frame and it sits at 0DOF forever -- unless the synthetic
+    /// TE kernel module is loaded. Loading it is NOT persistent (Magisk is not
+    /// installed, so there is no boot hook), so the host does it after every
+    /// boot. Flagged rather than detected: the module refuses to drive a line a
+    /// real panel is already driving, so guessing wrong is not free.
+    #[serde(default)]
+    pub panel_free: bool,
 }
 
 /// Map the byte a puck stamps onto the role it should be published as.
@@ -193,7 +203,7 @@ mod source_tests {
     use super::*;
 
     fn puck(ip: &str, device: u8, id: Option<u8>) -> PuckCfg {
-        PuckCfg { ip: ip.into(), device, id }
+        PuckCfg { ip: ip.into(), device, id, panel_free: false }
     }
 
     #[test]
