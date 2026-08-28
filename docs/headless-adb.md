@@ -208,6 +208,69 @@ The tracker app reads its config from a plain file:
 /sdcard/Android/data/com.mapperlocalizer.questtracker/files/config.txt
 ```
 
+### When the shell never starts
+
+Before any on-headset UI can be driven, `com.oculus.vrshell` has to get past
+startup. The symptom of it not doing so is a log that repeats forever at ~10 ms
+intervals:
+
+```
+[SEO] ShellApp: BlockingLaunch: Awaiting User Identity.
+```
+
+VrShell is blocking on an identity that `com.oculus.socialplatform` supplies, and
+socialplatform is dying on launch. Confirm which package, and why:
+
+```sh
+logcat -d -t 3000 > /data/local/tmp/lc.txt
+grep -A4 "FATAL EXCEPTION" /data/local/tmp/lc.txt
+grep -iE "ShellApp|User Identity" /data/local/tmp/lc.txt | tail
+dumpsys window | grep -E "mCurrentFocus|mFocusedApp"
+```
+
+The cause seen here was a **system app that had auto-updated past the OS**:
+
+```
+java.lang.NoSuchMethodError: No direct method <init>(Ljava/lang/String;F)V
+  in class Lcom/oculus/os/AnalyticsEvent; (declaration ... appears in
+  /system/framework/com.oculus.os.platform.jar)
+```
+
+The APK in `/data/app` was calling a framework method this build does not have.
+`pkgFlags=[ SYSTEM ... UPDATED_SYSTEM_APP ]` is the tell — compare against a
+headset whose shell works, which will show the factory version under
+`/system/app`:
+
+```sh
+dumpsys package com.oculus.socialplatform | grep -E "versionName=|codePath=|pkgFlags="
+```
+
+Removing the update reverts to the `/system` copy, which by construction matches
+the framework:
+
+```sh
+pm uninstall com.oculus.socialplatform          # NO --user flag
+```
+
+**`pm uninstall --user 0` is the wrong command** and looks like it worked
+(`Success`): it uninstalls the package *for that user* and leaves the update in
+place, so the shell now has no socialplatform at all. Recover with
+`cmd package install-existing com.oculus.socialplatform`, then run the plain
+`pm uninstall`. The `codePath` flipping back to `/system/app/…` is the
+confirmation.
+
+A residual crash loop in `com.oculus.horizon` may remain, restarting every ~3 s:
+
+```
+Unable to start service com.facebook.rti.push.service.FbnsService ...
+  java.lang.RuntimeException: Tokenbinding not implemented for legacy auth
+```
+
+It does not block the shell. It also cannot be switched off the usual ways —
+both `pm disable-user` and `pm suspend` refuse with `Cannot disable a protected
+package` (suspend fails quietly, reporting `new suspended state: false`). It
+only appears on a headset that carries a signed-in account.
+
 ### Driving an on-headset UI over adb
 
 This is the one that is genuinely non-obvious, and it makes headless operation
@@ -266,16 +329,55 @@ use `adb reboot bootloader`.
 
 ### After a Magisk install
 
-Magisk changes how root works, which matters because every tool here assumes
-`adb root`:
-
 ```sh
 /sbin/magisk -V          # versionCode
 /sbin/magisk -v          # e.g. 30.7:MAGISK:R
-ls /sbin/ | grep magisk  # magisk, magisk32, magiskinit, magiskpolicy
-su -c id                 # request-based root, needs granting
-id -u                    # adb root may now return 2000, not 0
+ls -l /sbin/magisk* /sbin/su   # su is a symlink -> ./magisk
+mount | grep " /sbin "   # magisk on /sbin type tmpfs — if absent, it isn't really up
+pidof magiskd
+cat /cache/magisk.log    # rewritten each time the daemon starts
 ```
+
+**`adb root` keeps working.** The patched image still has `ro.debuggable=1`, so
+`adb root` gives a real uid 0 (`context=u:r:su:s0`) exactly as before — it just
+has to be re-issued after every boot, same as always. A shell that reports
+uid 2000 has not lost root to Magisk; it has simply not been rooted yet.
+
+### Completing Magisk's setup with no UI
+
+The Magisk app's post-install has two halves. The first — populating
+`/data/adb/magisk` with `busybox`, `magiskboot`, `magiskpolicy`, `stock_boot.img`
+— is already done by the install itself:
+
+```sh
+ls /data/adb/magisk       # needs root; expect ~12 files incl. busybox, stock_boot.img
+```
+
+The second half is **granting root**, and that is the part that needs the app.
+With no grant recorded, `su` sits in the default *query* policy: magiskd asks the
+manager app to raise a prompt, and on a headset with no working shell that prompt
+never appears — so `su -c id` **hangs forever** rather than failing.
+
+Grant it from the database instead (`policy=2` is allow):
+
+```sh
+/sbin/magisk --sqlite "REPLACE INTO policies (uid,policy,until,logging,notification) VALUES(2000,2,0,1,0)"
+/sbin/magisk --sqlite "REPLACE INTO settings (key,value) VALUES(\"root_access\",3)"
+/sbin/magisk --sqlite "SELECT * FROM policies"
+su -c id                 # now returns instantly, context=u:r:magisk:s0
+```
+
+uid 2000 is `shell`. `root_access=3` is APPS_AND_ADB and is the default anyway,
+but it is absent from a fresh database, so setting it removes a variable.
+
+Two traps:
+
+- **`--sqlite` talks to the daemon**, so it needs root itself. Bootstrap with
+  `adb root`, not with `su`.
+- **Do not run `SELECT sql FROM sqlite_master`.** It kills magiskd — the client
+  reports `failed to fill whole buffer` and every later call gets
+  `Cannot connect to daemon: Connection refused`. Nothing restarts it
+  automatically; `/sbin/magisk --daemon` brings it back.
 
 ---
 
