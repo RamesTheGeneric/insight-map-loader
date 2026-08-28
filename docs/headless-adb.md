@@ -366,6 +366,65 @@ AVB1 signing is not an obstacle. These images report `AVB1_SIGNED` and there is
 no separate `vbmeta` partition, but an unlocked bootloader
 (`verifiedbootstate=orange`) boots the resigned image without complaint.
 
+### Completing Magisk on a puck with no screen
+
+`magiskinit` creates `/data/adb/{magisk,modules,post-fs-data.d,service.d}` but
+leaves `/data/adb/magisk` **empty** — those binaries normally arrive with the
+Magisk app, which a panel-free puck cannot run. Until they are there, modules
+never execute:
+
+```
+* Initializing Magisk environment
+* Magisk environment incomplete, abort        # every boot, not just the first
+$ magisk --install-module foo.zip
+Incomplete Magisk install                     # rc=1, no other explanation
+```
+
+Copy the environment from a headset that has it, keeping ownership and label:
+
+```sh
+for f in magisk magisk32 magiskboot magiskinit magiskpolicy busybox \
+         init-ld stub.apk util_functions.sh addon.d.sh boot_patch.sh; do
+  adb -s <DONOR> pull /data/adb/magisk/$f .
+done
+adb -s <DONOR> pull /data/adb/magisk/chromeos chromeos
+adb -s <NEW> push . /data/local/tmp/magiskenv/
+adb -s <NEW> shell 'cp -r /data/local/tmp/magiskenv/. /data/adb/magisk/
+                    chown -R root:root /data/adb/magisk
+                    chmod -R 0755 /data/adb/magisk
+                    restorecon -R /data/adb/magisk'
+```
+
+Skip any `kernel`, `kernel_dtb`, `ramdisk.cpio`, `new-boot.img` or
+`stock_boot.img` — those are leftovers from patching, not part of the
+environment. Then **reboot once** before `--install-module`; the check runs
+against what the daemon found at boot.
+
+Verified working: on a panel-free puck the module's `post-fs-data.sh` runs
+before the sensors HAL, GPIO 10 goes from 0 interrupts to ~70 Hz, and tracking
+reaches `6DOF Valid: Yes` about 55 s into a cold boot with nothing on the host.
+
+### A puck that disappears into mass storage
+
+```sh
+lsusb | grep 2833
+# 2833:0186 = normal adb    2833:0083 = msc / recovery — no adb, no fastboot
+```
+
+`2833:0083` almost always means **the battery is flat**, not that the flash was
+rejected. The tells: boots that take ~5 minutes, USB enumerating and dropping on
+a roughly two-minute cycle, and an uptime that never gets past a few minutes.
+A reported battery level taken between reboots is not trustworthy here — one was
+seen at 92% while cycling.
+
+**A USB hub will not charge these.** Put it on a real charger, leave it off
+until it is full, and it boots normally and stays up.
+
+Do not power-cycle repeatedly while it sits in msc: the bootloader can self-heal
+by writing a golden stock boot into `boot_b`, which silently undoes a Magisk
+flash and looks like the patch failed. Check with an md5 of the partition before
+concluding anything.
+
 ### After a Magisk install
 
 ```sh
