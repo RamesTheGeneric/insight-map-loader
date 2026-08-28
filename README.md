@@ -3,28 +3,9 @@
 **Full-body tracking from retired Quest 1 headsets, worn as body pucks.**
 
 The name is the mechanism: it **loads one Insight map onto several headsets**. That is
-the whole trick — a Quest 1 already contains a competent SLAM system, and headsets
-holding the same map track in the same coordinate frame. This project moves that map from
+the whole trick. A Quest 1 already contains a competent SLAM system, and headsets
+holding the same map track in the same tracking space. This project moves that map from
 one headset to the others and feeds their poses to SteamVR as generic trackers.
-
-No lighthouses, no marker boards, no calibration ritual. A Quest 1 is a four-camera
-inside-out tracker with an IMU that Meta no longer supports; there are a lot of them, and
-they are cheap.
-
-```
-  puck (Quest 1)                   host                        SteamVR
-  ┌───────────────┐  MPT1/UDP  ┌──────────────────┐  MPT1  ┌────────────────┐
-  │ Insight SLAM  │───────────▶│ insight-map-     │───────▶│ driver_mapper  │
-  │ q1tracker app │  pose 72Hz │ loader (+GUI)    │udp/5181│ GenericTrackers│
-  └───────────────┘            └──────────────────┘        └────────────────┘
-         ▲                              │
-         │ shared map (mapdb)           │ adb: status, map share, roles
-         └──────────────────────────────┘
-```
-
-Because the pucks share a map, **no inter-puck transform is solved or stored** — the
-historical failure mode of this kind of system, where a stored calibration goes stale the
-moment the tracker relocalizes.
 
 ---
 
