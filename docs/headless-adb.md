@@ -271,6 +271,54 @@ both `pm disable-user` and `pm suspend` refuse with `Cannot disable a protected
 package` (suspend fails quietly, reporting `new suspended state: false`). It
 only appears on a headset that carries a signed-in account.
 
+### Pairing a controller with no UI
+
+Pairing looks like it needs the Settings panel or the phone app. It doesn't —
+there is a CLI:
+
+```sh
+pairing_ctl --help
+#   pairing_ctl start [-l <pulsar_id>] [-r <pulsar_id>] [-a] [-t <secs>] [-j]
+#   pairing_ctl unpair [OPTION]
+dumpsys OVRRemoteService        # paired records, per-device state, pairing history
+```
+
+`dumpsys OVRRemoteService` is the place to look first. It lists each paired
+controller with `Type`, `Status`, `Firmware` and `Battery`, plus a **Pairing
+history** section that says what the last scan actually did.
+
+**`--auto` does not mean "any controller".** It calls
+`scanAndPairDevice(type=0, …)`, and a controller advertising as type 1 is
+rejected — the scan keeps finding it and refusing it, then reports a plain
+timeout:
+
+```
+Found 1 advertising controllers after 46.10s
+Won't attempt pairing with id 8be18feb…, wrong device type.
+scanAndPairDevice(type=0, id=[], timeout=120000): timed_out
+```
+
+`{"errorMessage": "... Timed Out (please check controller is in pairing mode)"}`
+is therefore misleading: the controller *was* in pairing mode and *was* seen.
+
+Get the id from logcat while a scan is running, then pair it explicitly by hand:
+
+```sh
+logcat -d -t 4000 | grep -iE "advertising controller|Won.t attempt pairing"
+# Advertising controller details: id: <pulsar_id>, serialNumber: <serial>, ...
+pairing_ctl start -l <pulsar_id> -t 120 -j        # -l left, -r right
+```
+
+That returns `"status": "SUCCESS"` with the controller listed as `LeftHand`, and
+it replaces whatever record previously held that hand. Confirm it really
+connected rather than merely being recorded: **`Firmware` and `Battery` stay
+empty and `-1%` until the controller has actually talked to the headset.**
+
+Hold **Y + Menu** (left) or **B + Home** (right) until the LED blinks to
+advertise, and note the controller's own pairing mode times out — it has to be
+blinking *while* the scan runs. A dead AA is indistinguishable from "not in
+pairing mode" from the host side.
+
 ### Driving an on-headset UI over adb
 
 This is the one that is genuinely non-obvious, and it makes headless operation
