@@ -452,12 +452,12 @@ fn spawn_aggregate(cfg: Config, ingest: Arc<Ingest>, shared: Arc<Shared>) -> Res
                     let roster = shared.pucks.read().unwrap().clone();
                     ip_of = roster.iter().map(|p| (p.device, p.ip.clone())).collect();
                     let bridges = config::load_bridges(&cfg.bridge).unwrap_or_default();
-                    agg.transforms = config::build_transforms_for(&roster, &bridges);
+                    agg.transforms = config::build_transforms_for(&roster, &cfg.extras, &bridges);
                     // Rebuilt with the transforms: a role change alters which
                     // role a source publishes as, and the two must never
                     // disagree or a puck emits under one role with another's
                     // transform.
-                    agg.roles = config::source_to_role(&roster);
+                    agg.roles = config::source_to_role(&roster, &cfg.extras);
                     // Any transform change moves everything; old statistics lie.
                     drift.reset();
                     last_pose.clear();

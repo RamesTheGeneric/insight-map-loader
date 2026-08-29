@@ -28,6 +28,30 @@ pub struct Config {
     /// The host address the pucks stream to; they need it spelled out.
     pub host: String,
     pub pucks: Vec<PuckCfg>,
+    /// Sources that are a role without being a puck.
+    ///
+    /// A puck's tracker can emit more than its own pose: a Touch controller,
+    /// held or strapped to a limb, is published as an extra MPT1 source. Those
+    /// need a role, but they are NOT fleet members -- nothing bridges,
+    /// provisions or syncs a map to a controller. Keeping them out of `pucks`
+    /// is what stops every fleet path treating one headset as two.
+    #[serde(default)]
+    pub extras: Vec<ExtraCfg>,
+}
+
+/// One extra source emitted by a puck's tracker.
+#[derive(Deserialize, Clone)]
+pub struct ExtraCfg {
+    /// The puck whose tracker emits this source.
+    ///
+    /// Not decoration: the pose arrives in that puck's XR LOCAL frame, so it
+    /// needs that puck's bridge to reach the shared world. Without it the pose
+    /// publishes unbridged and lands somewhere plausible but wrong.
+    pub ip: String,
+    /// The SteamVR role to publish it as.
+    pub device: u8,
+    /// The byte it stamps into every packet.
+    pub id: u8,
 }
 
 fn d_listen() -> String { "0.0.0.0:5180".into() }
@@ -53,10 +77,11 @@ pub struct PuckCfg {
     ///
     /// A panel-free puck has no TE signal, so the camera frame timestamper
     /// rejects every frame and it sits at 0DOF forever -- unless the synthetic
-    /// TE kernel module is loaded. Loading it is NOT persistent (Magisk is not
-    /// installed, so there is no boot hook), so the host does it after every
-    /// boot. Flagged rather than detected: the module refuses to drive a line a
-    /// real panel is already driving, so guessing wrong is not free.
+    /// TE kernel module is loaded. On a puck running Magisk that now happens at
+    /// boot from `post-fs-data`; the host still loads it for any puck without,
+    /// since an `insmod` does not survive a power-cycle. Flagged rather than
+    /// detected: the module refuses to drive a line a real panel is already
+    /// driving, so guessing wrong is not free.
     #[serde(default)]
     pub panel_free: bool,
 }
@@ -68,11 +93,18 @@ pub struct PuckCfg {
 /// than a separate code path. Returns None-able entries by construction: an
 /// unrecognised source byte is deliberately NOT in the map, so the caller can
 /// report an unknown puck instead of silently adopting whatever slot it claims.
-pub fn source_to_role(pucks: &[PuckCfg]) -> BTreeMap<u8, Device> {
+pub fn source_to_role(pucks: &[PuckCfg], extras: &[ExtraCfg]) -> BTreeMap<u8, Device> {
     let mut m = BTreeMap::new();
     for p in pucks {
         if let Some(role) = Device::from_u8(p.device) {
             m.insert(p.id.unwrap_or(p.device), role);
+        }
+    }
+    // After the pucks: an extra claiming a puck's id is a config mistake, and
+    // losing the puck's own pose to it would be the worse of the two outcomes.
+    for e in extras {
+        if let Some(role) = Device::from_u8(e.device) {
+            m.entry(e.id).or_insert(role);
         }
     }
     m
@@ -100,6 +132,31 @@ impl Config {
                     "pucks {prev} and {} both use device {} -- ids must be unique, \
                      they select the SteamVR tracker",
                     p.ip, p.device
+                ));
+            }
+        }
+        // Extras select a tracker slot exactly as pucks do, so they collide the
+        // same way and are checked against the same set.
+        for e in &self.extras {
+            if let Some(prev) = seen.insert(e.device, &e.ip) {
+                return Err(format!(
+                    "extra id {} on {} uses device {}, already taken by {prev} \
+                     -- one role, one source",
+                    e.id, e.ip, e.device
+                ));
+            }
+        }
+        // A source byte is what selects the role; two sources sharing one means
+        // the ingest keeps whichever packet landed last.
+        let mut ids: BTreeMap<u8, String> = BTreeMap::new();
+        for p in &self.pucks {
+            ids.insert(p.id.unwrap_or(p.device), p.ip.clone());
+        }
+        for e in &self.extras {
+            if let Some(prev) = ids.insert(e.id, e.ip.clone()) {
+                return Err(format!(
+                    "extra on {} claims id {}, already stamped by {prev}",
+                    e.ip, e.id
                 ));
             }
         }
@@ -206,9 +263,47 @@ mod source_tests {
         PuckCfg { ip: ip.into(), device, id, panel_free: false }
     }
 
+    fn extra(ip: &str, device: u8, id: u8) -> ExtraCfg {
+        ExtraCfg { ip: ip.into(), device, id }
+    }
+
+    #[test]
+    fn an_extra_gets_its_own_role() {
+        // A controller emitted by a puck's tracker is a role of its own, on its
+        // own source byte -- the puck keeps publishing under its.
+        let m = source_to_role(&[puck("a", 0, Some(101))], &[extra("a", 3, 110)]);
+        assert_eq!(m.get(&101), Some(&Device::Waist));
+        assert_eq!(m.get(&110), Some(&Device::Chest));
+    }
+
+    #[test]
+    fn an_extra_cannot_steal_a_pucks_id() {
+        // Config::validate rejects this, but the map must not lose the puck's
+        // own pose even if a bad config reaches it: pucks are inserted first
+        // and an extra only fills a vacancy.
+        let m = source_to_role(&[puck("a", 0, Some(101))], &[extra("a", 3, 101)]);
+        assert_eq!(m.get(&101), Some(&Device::Waist));
+    }
+
+    #[test]
+    fn duplicate_role_between_puck_and_extra_is_rejected() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"host":"h","pucks":[{"ip":"a","device":3,"id":101}],
+                "extras":[{"ip":"a","device":3,"id":110}]}"#).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn duplicate_source_byte_between_puck_and_extra_is_rejected() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"host":"h","pucks":[{"ip":"a","device":0,"id":110}],
+                "extras":[{"ip":"a","device":3,"id":110}]}"#).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
     #[test]
     fn a_provisioned_puck_is_keyed_by_its_id_not_its_role() {
-        let m = source_to_role(&[puck("a", 3, Some(200))]);
+        let m = source_to_role(&[puck("a", 3, Some(200))], &[]);
         assert_eq!(m.get(&200), Some(&Device::Chest));
         // The role number must NOT also resolve: only the id is on the wire,
         // and accepting the role too would let a stale puck claim the slot.
@@ -217,15 +312,15 @@ mod source_tests {
 
     #[test]
     fn a_legacy_puck_is_keyed_by_its_role() {
-        let m = source_to_role(&[puck("a", 3, None)]);
+        let m = source_to_role(&[puck("a", 3, None)], &[]);
         assert_eq!(m.get(&3), Some(&Device::Chest));
     }
 
     #[test]
     fn reassigning_a_role_does_not_change_what_the_puck_sends() {
         // The whole point: same id, different role, no device round trip.
-        let before = source_to_role(&[puck("a", 0, Some(42))]);
-        let after = source_to_role(&[puck("a", 5, Some(42))]);
+        let before = source_to_role(&[puck("a", 0, Some(42))], &[]);
+        let after = source_to_role(&[puck("a", 5, Some(42))], &[]);
         assert_eq!(before.get(&42), Some(&Device::Waist));
         assert_eq!(after.get(&42), Some(&Device::RightKnee));
         assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>());
@@ -251,7 +346,7 @@ mod source_tests {
 
     #[test]
     fn an_unknown_source_resolves_to_nothing() {
-        let m = source_to_role(&[puck("a", 0, Some(1))]);
+        let m = source_to_role(&[puck("a", 0, Some(1))], &[]);
         assert_eq!(m.get(&99), None, "an unclaimed id must not be adopted");
     }
 }
@@ -294,6 +389,7 @@ pub fn load_bridges(path: &str) -> Option<BTreeMap<String, BridgeEntry>> {
 /// transform for the new one, and the puck silently vanishes from SteamVR.
 pub fn build_transforms_for(
     pucks: &[PuckCfg],
+    extras: &[ExtraCfg],
     bridges: &BTreeMap<String, BridgeEntry>,
 ) -> BTreeMap<Device, Frame4Dof> {
     let mut out = BTreeMap::new();
@@ -302,6 +398,14 @@ pub fn build_transforms_for(
             continue;
         };
         out.insert(device, Frame4Dof { yaw: b.yaw_deg.to_radians(), t: b.t });
+    }
+    // An extra shares the XR LOCAL frame of the puck that emits it, so it takes
+    // that puck's bridge. Same transform, different role.
+    for e in extras {
+        let (Some(device), Some(b)) = (Device::from_u8(e.device), bridges.get(&e.ip)) else {
+            continue;
+        };
+        out.entry(device).or_insert(Frame4Dof { yaw: b.yaw_deg.to_radians(), t: b.t });
     }
     out
 }
@@ -321,13 +425,37 @@ mod transform_tests {
     }
 
     #[test]
+    fn an_extra_inherits_the_bridge_of_the_puck_that_emits_it() {
+        // The controller pose arrives in that puck's XR LOCAL frame. Publishing
+        // it with no transform would put it in the room at a plausible but
+        // wrong place, which is far worse than not publishing it at all.
+        let cfg: Config = serde_json::from_str(
+            r#"{"host":"h","pucks":[{"ip":"1.1.1.1","device":0,"id":101}],
+                "extras":[{"ip":"1.1.1.1","device":3,"id":110}]}"#).unwrap();
+        let mut bridges = BTreeMap::new();
+        bridges.insert("1.1.1.1".to_string(), bridge(30.0, [1.0, 0.0, 2.0]));
+        let out = build_transforms_for(&cfg.pucks, &cfg.extras, &bridges);
+        assert_eq!(out[&Device::Chest], out[&Device::Waist]);
+    }
+
+    #[test]
+    fn an_extra_with_no_bridge_is_omitted() {
+        // Same rule the pucks follow: no bridge means no transform, and a pose
+        // with no transform must not be published at all.
+        let cfg: Config = serde_json::from_str(
+            r#"{"host":"h","pucks":[{"ip":"1.1.1.1","device":0,"id":101}],
+                "extras":[{"ip":"1.1.1.1","device":3,"id":110}]}"#).unwrap();
+        assert!(build_transforms_for(&cfg.pucks, &cfg.extras, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
     fn output_is_the_bridge_alone() {
         // No T_map_world term exists: the pucks share one map, so the only
         // transform is each puck's LOCAL->world bridge.
         let cfg = cfg_of(r#"{"ip":"1.1.1.1","device":0}"#);
         let mut bridges = BTreeMap::new();
         bridges.insert("1.1.1.1".to_string(), bridge(30.0, [1.0, 0.0, 2.0]));
-        let out = build_transforms_for(&cfg.pucks, &bridges);
+        let out = build_transforms_for(&cfg.pucks, &cfg.extras, &bridges);
         let f = out[&Device::from_u8(0).unwrap()];
         assert!((f.yaw - 30f32.to_radians()).abs() < 1e-6);
         assert_eq!(f.t, [1.0, 0.0, 2.0]);
@@ -340,7 +468,7 @@ mod transform_tests {
         let cfg = cfg_of(r#"{"ip":"1.1.1.1","device":0},{"ip":"2.2.2.2","device":1}"#);
         let mut bridges = BTreeMap::new();
         bridges.insert("1.1.1.1".to_string(), bridge(0.0, [0.0; 3]));
-        let out = build_transforms_for(&cfg.pucks, &bridges);
+        let out = build_transforms_for(&cfg.pucks, &cfg.extras, &bridges);
         assert!(out.contains_key(&Device::from_u8(0).unwrap()));
         assert!(!out.contains_key(&Device::from_u8(1).unwrap()));
     }
@@ -350,7 +478,7 @@ mod transform_tests {
         let cfg = cfg_of(r#"{"ip":"1.1.1.1","device":99}"#);
         let mut bridges = BTreeMap::new();
         bridges.insert("1.1.1.1".to_string(), bridge(0.0, [0.0; 3]));
-        assert!(build_transforms_for(&cfg.pucks, &bridges).is_empty());
+        assert!(build_transforms_for(&cfg.pucks, &cfg.extras, &bridges).is_empty());
     }
 }
 
