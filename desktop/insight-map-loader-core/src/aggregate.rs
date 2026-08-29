@@ -81,6 +81,11 @@ impl Aggregator {
                 continue;
             };
             let mut pkt: Packet = sample.packet;
+            // Re-stamp the wire byte with the ROLE. Downstream is the SteamVR
+            // driver, which indexes its device table by this byte and silently
+            // drops anything >= the table size -- so leaving a puck id of 100+
+            // here loses every packet with no error on either side.
+            pkt.src = device as u8;
             pkt.pose = tr.apply_pose(&pkt.pose);
             pkt.vel = tr.rotate(pkt.vel);
             pkt.angvel = tr.rotate(pkt.angvel);
@@ -171,6 +176,9 @@ mod tests {
         let out = Packet::decode(&buf[..n]).unwrap();
         assert!((out.vel[0] - 1.0).abs() < 1e-4, "velocity must rotate too");
         assert_ne!(out.t_ns, 42, "timestamp must be rewritten to the host clock");
+        // The puck id goes in, the role comes out: the consumer indexes on this
+        // byte, so a leaked source id is dropped or lands on the wrong body part.
+        assert_eq!(out.src, Device::Waist as u8, "emit must carry the role, not the puck id");
 
         // Same sample again: transformed for display, not re-sent.
         agg.tick(&ingest);
