@@ -46,6 +46,27 @@ of map on disk, so the binder's map store is a *different* store from the mapdb
 files. `scheduleSaveMap` sits behind a VR-focus wall. The serializer is not
 hookable; the binary is stripped.
 
+**The reason, settled by disassembly.** These are not gated, they are absent.
+`listMaps`, `loadMap`, `keepMap`, `exportMapFile` and `importMapFile` are five
+adjacent stub functions in `coretech::InsideOutTrackingEngine` that only log
+`InsideOutTrackingEngine API {} is not supported.`, and the same addresses sit
+in the same vtable slots of `coretech::InsideOutDefaultTracking` — the only
+concrete engine in the library. Nothing overrides them and there is no second
+engine to select. Real export/import code exists in the mapper layer but is
+non-virtual and appears in no vtable, so the engine never reaches it. This also
+kills the "produce a `.map` file by some other route" idea: `writeMap` ingests
+one through `importMapFile`, which is a stub, so a hand-made file has no
+consumer. Full working in
+[docs/insight-map-and-anchors.md](docs/insight-map-and-anchors.md).
+
+Distinguish three refusals before concluding anything: `Permission denied in
+… for caller N` is a permission check; `… is not supported with no anchor
+manager exists` is **state**, and clears if you enable `com.oculus.guardian`
+and restart `trackingservice`; the plain `… is not supported.` is a stub and
+never clears. `stopMapExpansion` (transaction 9) — the "localize but stop
+extending the map" switch, which is exactly what a transplanted-map fleet
+wants — is ungated and is one of the stubs.
+
 ### Memory forensics: works, but not well enough
 
 The map *can* be read out of `trackingservice` RAM with `process_vm_readv`

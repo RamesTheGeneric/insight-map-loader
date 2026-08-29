@@ -682,6 +682,11 @@ So export/import are a **file copy** (`sendfile`) of a `.map` file keyed by
 uuid. If a `.map` file existed, that transport is likely usable. Nothing
 creates one, because of the gate above.
 
+> **Superseded.** "If a `.map` file existed" turns out not to help: the
+> engine-side `importMapFile` that `writeMap` calls to ingest one is itself a
+> stub. See *[Why the map API is unsupported: it was never
+> implemented](#why-the-map-api-is-unsupported-it-was-never-implemented)*.
+
 ## Where the gate actually lives
 
 Not in `trackingservice`: the only gatekeepers it queries are `arvr_gk_nimble_*`
@@ -734,8 +739,9 @@ gate.
    re-fetch and revert on the next server sync.
 2. Start `com.facebook.spatial_persistence_service` directly and see whether it
    self-gates or comes up.
-3. If a `.map` file can be produced by any route, test the `sendfile` transport
-   between pucks directly.
+3. ~~If a `.map` file can be produced by any route, test the `sendfile` transport
+   between pucks directly.~~ **Closed** -- `importMapFile` is a stub, so a
+   hand-made `.map` file has no consumer. See the final section.
 
 ## Side note: a tracking scare that was not one
 
@@ -957,3 +963,122 @@ pitfall worth keeping as a comment in the source rather than rediscovering:
 service killed by the platform within a couple of seconds on this OS version,
 which silently truncates whatever it was doing -- a couple of early "no
 output" results were this, not a real failure.
+
+---
+
+# Why the map API is unsupported: it was never implemented
+
+The sections above traced the **anchor** family to a server-side gatekeeper
+chain. The **map-store** family is walled for an entirely different and simpler
+reason, established by disassembly rather than inference: on this build the
+methods do not exist. There is no flag behind them.
+
+## The symptom
+
+Every map-store call reaches the service, passes its permission check, and is
+refused by the engine with one message:
+
+```
+D TrackingService: TrackingEnvironment::keepMap(8994724e-...)
+W [CT] : VisionInterface: InsideOutTrackingEngine API keepMap is not supported.
+```
+
+Identical for `loadMap`, `listMaps` and `stopMapExpansion`. Note this is *not*
+the `Capability not available for placeAnchor` message the anchor family gives,
+and *not* a permission error -- `getDebugInfo` shows what that looks like
+(`Permission denied in TrackingEnvironment::getDebugInfo for caller 0`), and
+these calls do not produce it.
+
+There is a third message worth telling apart, because it is the one that *is*
+state-dependent:
+
+```
+InsideOutTrackingEngine API getCurrentMapUUID is not supported with no anchor manager exists
+```
+
+That one is fixable. With `com.oculus.guardian` disabled -- which is the normal
+fleet state -- the engine has no anchor manager and `getCurrentMapUUID` refuses.
+Enable guardian, restart `trackingservice`, and the anchor manager comes up
+(`VEGA_MAPPER:ANCHOR_MANAGER`, `RegisterServer: SUCCESS ... SlamAnchorServer`),
+the persistent context loads, and `getCurrentMapUUID` answers normally. **The
+other four still refuse, with the plain message.** So the plain message is a
+hard "this does not exist", not a state problem -- worth checking that way round
+before concluding anything about a refusal.
+
+## The cause, from the vtables
+
+Find the format string `InsideOutTrackingEngine API {} is not supported.` and
+cross-reference it in `.text` (ADRP/ADD pairs -- the throwaway scripts are not
+checked in). It has one string address and a tight cluster of call sites, each
+preceded by its own API name:
+
+```
+0x5a86e4  listMaps          0x5a877c  exportMapFile
+0x5a8730  loadMap           0x5a87d0  importMapFile
+0x5a881c  keepMap
+```
+
+Five adjacent ~76-byte functions that do nothing but log. Resolving which
+vtables contain them -- the addresses are not literals in the file, they are
+`R_AARCH64_RELATIVE` addends, so `.rela.dyn` has to be parsed -- gives:
+
+```
+coretech::InsideOutTrackingInterface        (interface)
+  +-- coretech::InsideOutTrackingEngine     (declares the stubs)
+        +-- coretech::InsideOutDefaultTracking   (the concrete engine)
+```
+
+**The same stub addresses occupy the same slots in both vtables.**
+`InsideOutDefaultTracking` does not override them; it inherits the "not
+supported" defaults. And it is the only concrete subclass in the library --
+the full set of engine classes is `InsideOutTrackingInterface`,
+`InsideOutTrackingEngine`, `InsideOutDefaultTracking`, plus the unrelated
+`HandTrackingEngine`/`HandDefaultTracking` and `ConstellationTrackingEngine`,
+which share the same interface/engine/default shape. So there is no second
+engine to select, no build variant present, nothing to switch.
+
+## What this closes
+
+Real map export/import code *is* in the library, as non-virtual functions the
+engine never calls -- `Exporting map to {}`, `Context storage is empty, cannot
+export map!`, `Imported entire map with stats: {}` all live at unrelated
+addresses and appear in no vtable. It belongs to the mapper layer, not the
+engine's public surface.
+
+That makes the chain behind the file errors complete:
+
+```
+exportMapDataForAnchor(uuid, fd)      [native, in trackingservice]
+   -> wants <uuid>.map
+   -> only InsideOutTrackingEngine::exportMapFile writes one
+   -> stub                           -> "Map file (%s) not found in exportMapDataForAnchor"
+
+writeMap(fd, uuid, n)                 [the import direction]
+   -> creates the target file, then hands it to importMapFile to ingest
+   -> stub                           -> "importMapFile failed in writeMap"
+```
+
+So the transport is not merely starved of a payload: **even a hand-crafted
+`.map` file has no consumer.** That retires the "if a `.map` file existed"
+lead entirely.
+
+`tracking_map_state: STATE_UNKNOWN` with an empty `map_uuid` in `dumpsys
+tracking` is the same fact seen from the front: the map store never leaves its
+initial state, while the Vega context alongside it is loaded and persistent.
+The two are separate systems, and only the Vega one is ours to use.
+
+## `stopMapExpansion` -- the map-freeze switch
+
+Worth calling out because it is the API you would want and it looks available.
+`ITrackingEnvironment` transaction **9** is `stopMapExpansion(boolean)`, which
+is exactly "keep localizing, stop extending the map" -- the thing that would
+stop transplanted map copies diverging per puck. It is ungated: root reaches the
+engine with no permission check. It is also one of the stubs.
+
+The remaining lever for that problem is filesystem-level: freeze
+`/vision/insideout/mapdb` read-only from Magisk `post-fs-data`
+(see [magisk-boot-modules.md](magisk-boot-modules.md) for the hook). That bounds
+divergence **across restarts only** -- the in-memory map still deforms within a
+session, and `vegamapper.schedule_save_map` writes *from* that map, so blocking
+the write does not stop the deformation. Measure whether map deformation is
+actually the dominant drift term before building on it.
