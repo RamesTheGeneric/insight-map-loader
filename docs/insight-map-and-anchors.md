@@ -1082,3 +1082,105 @@ divergence **across restarts only** -- the in-memory map still deforms within a
 session, and `vegamapper.schedule_save_map` writes *from* that map, so blocking
 the write does not stop the deformation. Measure whether map deformation is
 actually the dominant drift term before building on it.
+
+## Where the real implementation went: RuntimeIPC, not binder
+
+The stubs are not the whole story. The working map code is not dead — it is
+live, registered, and reachable, just not over binder. Following it explains why
+the binder methods are stubs in the first place.
+
+### The real export is wired to a work queue
+
+`Executing selected submaps export w/ {} L1s` sits in a function called from the
+**mapper thread's work-item dispatcher** (the one that fails with `Unknown type
+given via mapper::WorkItem.`). Its guards are worth reading, because they are
+the actual preconditions for a map export:
+
+```
+Context storage is empty, cannot export map!
+The map has no active metadata and will not be exported.
+The active context doesn't have a worldOriginAnchor yet, skip exporting map!
+No L1s are selected to export. Skip!
+```
+
+A separate function writes the result out (`Exporting map to {}`, `The exported
+map cache directory does not exist. {}`), and a third ingests one (`Imported
+entire map with stats: {}`).
+
+### Its only caller is an RPC handler
+
+Resolving the vtable that holds the map-cache writer's caller gives the answer
+in one string:
+
+```
+std::__function::__func<
+    reflect::SlamAnchorRuntimeIpcServer::initServer(const std::string&)
+        ::lambda(unsigned, const reflect::ExportRequest&, int&), ...>
+```
+
+So the real export is the **`ExportRequest` handler of a RuntimeIPC server**
+running inside `trackingservice` — the `SlamAnchorServer` that appears in logcat
+when guardian comes up first:
+
+```
+RuntimeIPCServerMgr [RUNTIMEIPC]: RegisterServer: SUCCESS:
+    native_process.system:/system/bin/trackingservice (SlamAnchorServer)
+```
+
+`initServer` registers thirteen handlers. Recovered from the mangled lambda
+types, the surface is the entire colocation API:
+
+| request | response | what it is |
+|---|---|---|
+| `ExportRequest` | `int&` | the real selected-submaps export |
+| `FileDescriptor` | `vector<SlamAnchorResult<ImportResult>>` | **import a map from an fd** |
+| `MapChunk` | `bool&` | import one chunk (streaming in) |
+| `bool` | `MapChunk&` | export one chunk (streaming out) |
+| `LocalizationRequest` | `SlamAnchorResult<RegistrationResult>` | localize into a map |
+| `vector<AnchorUuid>` | `SlamAnchorResult<vector<RegistrationResult>>` | bulk anchor registration |
+| `AnchorUuid` | `bool&` (×2) | per-anchor operations |
+| `Void` | `SlamAnchorResult<AnchorInfo>` | anchor info |
+| `Void` | `vector<AnchorUuid>` | list anchors |
+| `Void` | `SlamAnchorResult<MultiFrameFeaturesQuery>` | feature query |
+| `EventUuid` | `Void` (×2) | event callbacks |
+
+That is why the binder methods are stubs: **the map API was moved off binder
+onto RuntimeIPC.** `ITrackingEnvironment`'s map half is a vestigial surface that
+was never deleted.
+
+### And the only client is the cloud service
+
+```sh
+adb shell 'grep -rl "SlamAnchorRuntimeIpcClient" /system /vendor'
+  /system/lib64/libtrackingengines.so                                # the server
+  /system/priv-app/SpatialPersistenceService/SpatialPersistenceService.apk
+```
+
+Nothing else on the device speaks it. `com.oculus.guardian` carries the
+RuntimeIPC *framework* (`RuntimeIPCClientBase`, `CallServerRPC`,
+`REGISTER_RPC_HANDLER`) but none of the SlamAnchor types, so it is a participant
+in other conversations, not this one. `SpatialPersistenceService` is the
+cloud-backed component analysed earlier, and it never runs, because
+`oculus_spatial_anchor_iaapi_v2` is false.
+
+So the two walls are one wall seen twice: the map path moved to RuntimeIPC, and
+the sole RuntimeIPC client for it is the component the gatekeeper keeps off.
+
+### What it would take, if it is ever worth it
+
+The transport is **ashmem for the data plane and hwbinder for
+discovery/registration** — `trackingservice` holds dozens of `/dev/ashmem` fds
+and one `/dev/hwbinder`, and the framework logs `ipcLoader [RUNTIMEIPC]` and
+`RuntimeIPC: android_get_exported_namespace` as it dlopens the client library.
+RPCs dispatch by name hash plus reflect `TypeInfo` (`RegisterRPC: Hash collision
+V1/V2`, `CallServerRPC: Unknown request type info`), so a client must agree on
+both. `SpatialPersistenceService.apk` contains the client half with the same
+type definitions, which makes it a usable reference for the wire format.
+
+**Not attempted, and probably not worth it.** Copying `mapdb` files already
+gives the pucks one shared frame, and that is the goal. The only things this
+route would add are a smaller sanctioned artifact than a whole mapdb, and
+`FileDescriptor`/`MapChunk` import **without restarting `trackingservice`** —
+which would remove the session interruption a re-seed currently costs. If the
+re-seed cadence ever becomes the bottleneck, this is where to look, and the RPC
+table above is the map.
